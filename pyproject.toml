@@ -1,0 +1,17 @@
+[project]
+name = "cartesi-knowledge-mcp"
+version = "0.1.0"
+description = "Industry-grade MCP server for Cartesi resource knowledge"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic==1.16.5",
+  "asyncpg==0.30.0",
+  "greenlet>=3.3.2",
+  "mcp[cli]==1.26.0",
+  "pydantic==2.11.7",
+  "pydantic-settings==2.10.1",
+  "sqlalchemy==2.0.43",
+]
+
+[tool.uv]
+package = false
