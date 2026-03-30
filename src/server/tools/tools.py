@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from uuid import UUID
 from src.server.server import mcp, resource_service
 from src.core.config import get_settings
 from src.schemas.tools import LOCAL_CLI_TRACK, STABLE_CARTESI_CLI, ALPHA_CARTESI_VERSION_PREFIX, STABLE_CREATE_TEMPLATES, ALPHA_CREATE_TEMPLATES, STABLE_OPTIONAL_RUN_SERVICES, ALPHA_OPTIONAL_RUN_SERVICES
-from src.services.local_interaction_helpers import _command, _version_guidance, _alpha_warning, _alpha_v2_warning, _local_execution_steps, _local_execution_steps_for_binary
+from src.services.local_interaction_helpers import _command, _version_guidance, _alpha_warning, _alpha_v2_warning, _local_execution_steps, _local_execution_steps_for_binary, _cartesi_app_logic_next_steps, get_default_local_privatekeys, normalize_input_payload_to_hex
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -292,7 +293,65 @@ async def prepare_cartesi_create_command(
         "next_steps": [
             *_local_execution_steps("create", stable_command or "cartesi create --help", destination_root),
             *_local_execution_steps_for_binary("create", alpha_command or "cartesi create --help", destination_root, "cartesi"),
+            *_cartesi_app_logic_next_steps(destination_root),
         ],
+    }
+
+
+@mcp.tool(
+    name="get_cartesi_app_logic_guidance",
+    description="Explain what an agent should check when implementing Cartesi application logic, including address-book usage and relevant documentation/tutorial topics.",
+)
+async def get_cartesi_app_logic_guidance(project_path: str = ".") -> dict:
+    return {
+        "status": "success",
+        "summary": "Prepared Cartesi application logic implementation guidance.",
+        "data": {
+            "execution_location": "Run any CLI commands on the user's machine, not on this MCP server.",
+            "project_path": project_path,
+            "required_local_command": "cartesi address-book",
+            "why_address_book_matters": [
+                "Use it to retrieve the local contract addresses and names needed for deposits and token interactions.",
+                "Typical references include InputBox, ERC20Portal, ERC721Portal, and other portal-related contracts exposed by the local environment.",
+            ],
+            "implementation_topics": [
+                "deposits",
+                "ERC20 interactions",
+                "ERC721 interactions",
+                "ERC20Portal usage",
+                "ERC721Portal usage",
+                "Sending inputs and assets"
+                "InputBox usage",
+                "vouchers",
+                "notices",
+                "reports",
+                "portal addresses",
+            ],
+            "recommended_doc_queries": [
+                "InputBox",
+                "ERC20 deposits",
+                "ERC721 deposits",
+                "vouchers",
+                "notices",
+                "reports",
+                "portals",
+                "Cartesi tutorials",
+                "tutorials",
+                "Cartesi documentation",
+                "documentation",
+                "docs",
+                "Cartesi guide",
+                "app demo"
+                "demo"
+                "integration"
+                "integration guide"
+                "tutorial"
+            ],
+        },
+        "warnings": [
+            "The MCP server can explain the workflow, but `cartesi address-book` must be run on the user's machine.",
+        ],
+        "next_steps": _cartesi_app_logic_next_steps(project_path),
     }
 
 
@@ -500,4 +559,93 @@ async def prepare_cartesi_run_command(
             *_local_execution_steps_for_binary("run", alpha_command, project_path, "cartesi"),
         ],
     }
+
+
+@mcp.tool(
+    name="send_input_to_application",
+    description="Generate host-machine instructions for sending an input to a running Cartesi application through the InputBox using cast.",
+)
+async def send_input_to_application(
+    application_address: str | None,
+    input_payload: str | dict[str, Any] | list[Any],
+    rpc_url: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+    project_path: str = ".",
+) -> dict:
+    input_hex = normalize_input_payload_to_hex(input_payload)
+    private_keys = get_default_local_privatekeys()
+    selected_private_key = private_keys[0]
+
+    cast_command = _command(
+        [
+            "cast",
+            "send",
+            "$input_box_address",
+            "addInput(address,bytes)",
+            application_address or "$application_address",
+            input_hex,
+            "--private-key",
+            selected_private_key,
+            "--rpc-url",
+            rpc_url or "$rpc_url",
+        ]
+    )
+
+    warnings: list[str] = []
+    if application_address is None:
+        warnings.append("The application address is required before sending input. Retrieve it from the running application context before executing the cast command.")
+    if rpc_url is None:
+        warnings.append("The RPC URL is required before sending input. For stable v1.5.x the common default is `http://127.0.0.1:8545`; for versions that start with `2.0.0`, the CLI run output may expose an application-specific RPC URL.")
+
+    return {
+        "status": "success",
+        "summary": "Prepared host-side instructions for sending an input to a Cartesi application.",
+        "data": {
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "requirements": {
+                "cast_install_check": [
+                    "command -v cast",
+                    "cast --version",
+                ],
+                "required_values": [
+                    "application_address",
+                    "rpc_url",
+                    "input_box_address",
+                    "hex_input_payload",
+                ],
+            },
+            "rpc_url_guidance": {
+                "stable_v1_5": "Usually `http://127.0.0.1:8545` for local dev flows.",
+                "version_starts_with_2_0_0": "Read the RPC URL from the output of `cartesi run` for the specific running application.",
+            },
+            "address_book_guidance": {
+                "command": "cartesi address-book",
+                "purpose": "Use this to find the InputBox and related local contract addresses before sending inputs.",
+                "target_contract": "InputBox",
+            },
+            "input_payload": {
+                "original": input_payload,
+                "normalized_hex": input_hex,
+                "normalization_rule": "If the payload already starts with 0x and is valid hex, it is used as-is. Otherwise it is UTF-8 or JSON encoded and then converted to 0x-prefixed hex.",
+            },
+            "private_keys": {
+                "default_signer_for_single_interaction": selected_private_key,
+                "all_default_local_private_keys": private_keys,
+                "usage_guidance": "Use the first private key for a single interaction by default. If multiple transactions must be signed by different individuals, assign different keys from this list to different actors.",
+            },
+            "stable_cast_command_template": cast_command,
+        },
+        "warnings": warnings,
+        "next_steps": [
+            "Run `command -v cast` and `cast --version` on the user's machine to confirm cast is installed.",
+            "Obtain the application address for the running Cartesi app.",
+            "Determine the RPC URL for the running app. For stable v1.5.x, `http://127.0.0.1:8545` is commonly used. For versions that start with `2.0.0`, inspect the `cartesi run` output for the app-specific RPC URL.",
+            "Run `cartesi address-book` on the user's machine and capture the InputBox address.",
+            f"Change into the relevant project directory on the user's machine if needed: `{project_path}`.",
+            f"Run this command on the user's machine after replacing the shell variables with real values: `{cast_command}`",
+            "If you need multiple distinct users to send transactions, reuse the same command with different private keys from the returned list.",
+        ],
+    }
+
 

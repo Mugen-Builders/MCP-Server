@@ -26,7 +26,10 @@ mcp = FastMCP(
         "When you need the actual contents of a page, fetch the returned canonical_url "
         "or route url with your web-fetching capability. Cartesi workflow helper tools "
         "in this server only generate instructions and commands for the user's own "
-        "machine; they do not execute the Cartesi CLI on this server."
+        "machine; they do not execute the Cartesi CLI on this server. When implementing "
+        "Cartesi application logic involving deposits, vouchers, notices, reports, or "
+        "portal interactions, have the agent run `cartesi address-book` on the user's "
+        "machine and consult relevant docs/tutorial resources for context."
     ), 
     json_response=True
     )
