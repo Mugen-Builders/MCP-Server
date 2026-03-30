@@ -24,7 +24,9 @@ mcp = FastMCP(
         "resource URI to get normalized metadata and related doc routes. This server "
         "currently returns curated metadata and external links, not full page bodies. "
         "When you need the actual contents of a page, fetch the returned canonical_url "
-        "or route url with your web-fetching capability."
+        "or route url with your web-fetching capability. Cartesi workflow helper tools "
+        "in this server only generate instructions and commands for the user's own "
+        "machine; they do not execute the Cartesi CLI on this server."
     ), 
     json_response=True
     )

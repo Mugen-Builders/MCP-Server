@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from uuid import UUID
-
 from src.server.server import mcp, resource_service
 from src.core.config import get_settings
+from src.schemas.tools import LOCAL_CLI_TRACK, STABLE_CARTESI_CLI, ALPHA_CARTESI_VERSION_PREFIX, STABLE_CREATE_TEMPLATES, ALPHA_CREATE_TEMPLATES, STABLE_OPTIONAL_RUN_SERVICES, ALPHA_OPTIONAL_RUN_SERVICES
+from src.services.local_interaction_helpers import _command, _version_guidance, _alpha_warning, _alpha_v2_warning, _local_execution_steps, _local_execution_steps_for_binary
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
 
 
 # -----------------
@@ -218,4 +220,284 @@ async def get_knowledge_base_summary() -> dict:
                 "Fetch the returned external URLs separately when deeper content inspection is required.",
             ],
         }
+
+
+@mcp.tool(
+    name="prepare_cartesi_create_command",
+    description="Generate step-by-step host-machine instructions for creating a Cartesi app with the user's own Cartesi CLI.",
+)
+async def prepare_cartesi_create_command(
+    project_name: str,
+    template: str,
+    destination_root: str = ".",
+    template_branch: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+) -> dict:
+    warnings: list[str] = []
+    stable_command: str | None = None
+    alpha_command: str | None = None
+
+    if template not in STABLE_CREATE_TEMPLATES:
+        warnings.append(
+            "The requested template is not part of the known stable v1.5.x template list; verify it locally with `cartesi create --help`."
+        )
+    else:
+        command_parts = ["cartesi", "create", project_name, "--template", template]
+        if template_branch:
+            command_parts += ["--branch", template_branch]
+        stable_command = _command(command_parts)
+
+    alpha_branch = template_branch or "prerelease/sdk-12"
+    if template not in ALPHA_CREATE_TEMPLATES:
+        warnings.append(
+            "The requested template is not part of the known Cartesi 2.0 alpha template list; verify it locally with `cartesi create --help`."
+        )
+    else:
+        alpha_parts = ["cartesi", "create", project_name, "--template", template, "--branch", alpha_branch]
+        alpha_command = _command(alpha_parts)
+
+    warnings.extend(_alpha_warning("create"))
+    warnings.extend(_alpha_v2_warning("create"))
+
+    return {
+        "status": "success",
+        "summary": f"Prepared host-side create instructions for project `{project_name}`.",
+        "data": {
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "requested_input": {
+                "project_name": project_name,
+                "template": template,
+                "destination_root": destination_root,
+                "template_branch": template_branch,
+            },
+            "stable_v1_5": {
+                "working_directory": destination_root,
+                "command": stable_command,
+                "expected_templates": list(STABLE_CREATE_TEMPLATES),
+            },
+            "alpha_v2_0": {
+                "binary": "cartesi",
+                "working_directory": destination_root,
+                "command": alpha_command,
+                "default_branch": "prerelease/sdk-12",
+                "expected_templates": list(ALPHA_CREATE_TEMPLATES),
+            },
+            "local_preflight": [
+                "cartesi --version",
+                "cartesi create --help",
+            ],
+        },
+        "warnings": warnings,
+        "next_steps": [
+            *_local_execution_steps("create", stable_command or "cartesi create --help", destination_root),
+            *_local_execution_steps_for_binary("create", alpha_command or "cartesi create --help", destination_root, "cartesi"),
+        ],
+    }
+
+
+@mcp.tool(
+    name="prepare_cartesi_build_command",
+    description="Generate step-by-step host-machine instructions for building a Cartesi app with the user's own Cartesi CLI.",
+)
+async def prepare_cartesi_build_command(
+    project_path: str,
+    from_image: str | None = None,
+    target: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+) -> dict:
+    command_parts = ["cartesi", "build"]
+    if from_image:
+        command_parts += ["--from-image", from_image]
+    if target:
+        command_parts += ["--target", target]
+    stable_command = _command(command_parts)
+    alpha_command = _command(["cartesi", "build"])
+
+    return {
+        "status": "success",
+        "summary": f"Prepared host-side build instructions for `{project_path}`.",
+        "data": {
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "requested_input": {
+                "project_path": project_path,
+                "from_image": from_image,
+                "target": target,
+            },
+            "stable_v1_5": {
+                "working_directory": project_path,
+                "command": stable_command,
+            },
+            "alpha_v2_0": {
+                "binary": "cartesi",
+                "working_directory": project_path,
+                "command": alpha_command,
+                "known_flags": [
+                    "--config <config>",
+                    "--drives-only",
+                    "--verbose",
+                ],
+            },
+            "local_preflight": [
+                "cartesi --version",
+                "cartesi build --help",
+            ],
+        },
+        "warnings": [
+            *_alpha_warning("build"),
+            *_alpha_v2_warning("build"),
+            "Cartesi 2.0 alpha build uses a different flow from stable: bundled command definitions show `--config`, `--drives-only`, and `--verbose`, not stable's `--from-image` or `--target` flags.",
+            *(
+                ["The provided `from_image` input maps to stable v1.5.x only; there is no known direct `cartesi build` equivalent from the inspected alpha bundle."]
+                if from_image
+                else []
+            ),
+            *(
+                ["The provided `target` input maps to stable v1.5.x only; Cartesi 2.0 alpha exposes `--config` instead in the inspected bundle, so the agent should re-check `cartesi build --help` locally before translating this input."]
+                if target
+                else []
+            ),
+        ],
+        "next_steps": [
+            *_local_execution_steps("build", stable_command, project_path),
+            *_local_execution_steps_for_binary("build", alpha_command, project_path, "cartesi"),
+        ],
+    }
+
+
+@mcp.tool(
+    name="prepare_cartesi_run_command",
+    description="Generate step-by-step host-machine instructions for running a Cartesi app with the user's own Cartesi CLI.",
+)
+async def prepare_cartesi_run_command(
+    project_path: str,
+    listen_port: int = 8080,
+    block_time: int = 5,
+    epoch_length: int = 720,
+    services: list[str] | None = None,
+    cpus: int | None = None,
+    memory_mb: int | None = None,
+    verbose: bool = False,
+    no_backend: bool = False,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+) -> dict:
+    requested_services = set(services or [])
+    unsupported_service_toggles = sorted(requested_services - STABLE_OPTIONAL_RUN_SERVICES)
+    unsupported_alpha_services = sorted(requested_services - ALPHA_OPTIONAL_RUN_SERVICES)
+
+    command_parts = [
+        "cartesi",
+        "run",
+        "--listen-port",
+        str(listen_port),
+        "--block-time",
+        str(block_time),
+        "--epoch-length",
+        str(epoch_length),
+    ]
+    if cpus is not None:
+        command_parts += ["--cpus", str(cpus)]
+    if memory_mb is not None:
+        command_parts += ["--memory", str(memory_mb)]
+    if verbose:
+        command_parts.append("--verbose")
+    if no_backend:
+        command_parts.append("--no-backend")
+    for service in sorted(STABLE_OPTIONAL_RUN_SERVICES - requested_services):
+        command_parts.append(f"--disable-{service}")
+
+    warnings = _alpha_warning("run")
+    warnings.extend(_alpha_v2_warning("run"))
+    if unsupported_service_toggles:
+        warnings.append(
+            "Stable v1.5.x only exposes toggles for these optional services: bundler, explorer, paymaster. "
+            f"These requested services cannot be mapped directly: {', '.join(unsupported_service_toggles)}."
+        )
+
+    alpha_parts = [
+        "cartesi",
+        "run",
+        "--port",
+        str(listen_port),
+        "--block-time",
+        str(block_time),
+        "--epoch-length",
+        str(epoch_length),
+        "--default-block",
+        "latest",
+    ]
+    if cpus is not None:
+        alpha_parts += ["--cpus", str(cpus)]
+    if memory_mb is not None:
+        alpha_parts += ["--memory", str(memory_mb)]
+    if verbose:
+        alpha_parts.append("--verbose")
+    if requested_services:
+        alpha_parts += ["--services", ",".join(sorted(requested_services))]
+    alpha_command = _command(alpha_parts)
+    if unsupported_alpha_services:
+        warnings.append(
+            "Cartesi 2.0 alpha bundled command definitions only mention these service names: bundler, espresso, explorer, graphql, paymaster. "
+            f"These requested services cannot be mapped directly: {', '.join(unsupported_alpha_services)}."
+        )
+    if no_backend:
+        warnings.append("`no_backend` is known for stable v1.5.x, but no equivalent flag was found in the inspected Cartesi 2.0 alpha run bundle.")
+
+    stable_command = _command(command_parts)
+
+    return {
+        "status": "success",
+        "summary": f"Prepared host-side run instructions for `{project_path}`.",
+        "data": {
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "requested_input": {
+                "project_path": project_path,
+                "listen_port": listen_port,
+                "block_time": block_time,
+                "epoch_length": epoch_length,
+                "services": sorted(requested_services),
+                "cpus": cpus,
+                "memory_mb": memory_mb,
+                "verbose": verbose,
+                "no_backend": no_backend,
+            },
+            "stable_v1_5": {
+                "working_directory": project_path,
+                "command": stable_command,
+                "optional_service_toggles": sorted(STABLE_OPTIONAL_RUN_SERVICES),
+            },
+            "alpha_v2_0": {
+                "binary": "cartesi",
+                "working_directory": project_path,
+                "command": alpha_command,
+                "known_flags": [
+                    "--prt",
+                    "--block-time <number>",
+                    "--cpus <number>",
+                    "--default-block <string>",
+                    "--dry-run",
+                    "--fork-url <url>",
+                    "--fork-block-number <number>",
+                    "--memory <number>",
+                    "--epoch-length <number>",
+                    "--port <number>",
+                    "--project-name <string>",
+                    "--services <string>",
+                    "--verbose",
+                ],
+                "optional_services": sorted(ALPHA_OPTIONAL_RUN_SERVICES),
+            },
+            "local_preflight": [
+                "cartesi --version",
+                "cartesi run --help",
+            ],
+        },
+        "warnings": warnings,
+        "next_steps": [
+            *_local_execution_steps("run", stable_command, project_path),
+            *_local_execution_steps_for_binary("run", alpha_command, project_path, "cartesi"),
+        ],
+    }
 
