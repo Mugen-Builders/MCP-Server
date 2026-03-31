@@ -6,6 +6,8 @@ from src.server.server import mcp
 
 
 def create_app():
+    # Use FastMCP's Starlette app directly so its lifespan runs StreamableHTTPSessionManager.run().
+    # Nesting this app under another Starlette app skips that lifespan and breaks MCP HTTP.
     return mcp.streamable_http_app()
 
 

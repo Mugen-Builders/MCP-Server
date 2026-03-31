@@ -18,7 +18,10 @@ settings = get_settings()
 # -----------------
 
 
-@mcp.tool()
+@mcp.tool(
+    name="search_knowledge_resources",
+    description="Search curated Cartesi knowledge resources by text query, source, tag, or kind and return matching resource cards.",
+)
 async def search_resources(
     query: str | None = None,
     tag: str | None = None,
@@ -45,7 +48,10 @@ async def search_resources(
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="get_resource_detail",
+    description="Get normalized metadata for a single resource by resource ID, with optional documentation routes.",
+)
 async def get_resource_details(resource_id: str, include_routes: bool = True) -> dict:
     """Fetches a fully normalized resource document by resource ID, including external links and related routes but not fetched page body text."""
     async with resource_service() as svc:
@@ -64,7 +70,10 @@ async def get_resource_details(resource_id: str, include_routes: bool = True) ->
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="list_resource_doc_routes",
+    description="List documentation routes for one documentation resource, optionally filtered by section.",
+)
 async def list_doc_routes(resource_id: str, section: str | None = None, limit: int = 25) -> dict:
     """Lists documentation routes for a documentation resource, optionally filtered by section; results include route links but not fetched route body text."""
     limit = min(max(limit, 1), settings.max_page_size)
@@ -84,7 +93,10 @@ async def list_doc_routes(resource_id: str, section: str | None = None, limit: i
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="search_documentation_routes",
+    description="Search documentation routes across resources using query text with optional section, source, and tag filters.",
+)
 async def search_doc_routes(
     query: str,
     section: str | None = None,
@@ -110,7 +122,10 @@ async def search_doc_routes(
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="list_resources_for_tag",
+    description="List resources associated with a specific tag title.",
+)
 async def list_resources_by_tag(tag_title: str, limit: int = 10) -> dict:
     """Lists resources associated with a specific tag."""
     limit = min(max(limit, 1), settings.max_page_size)
@@ -125,7 +140,10 @@ async def list_resources_by_tag(tag_title: str, limit: int = 10) -> dict:
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="list_resources_for_source",
+    description="List resources associated with a specific source title.",
+)
 async def list_resources_by_source(source_title: str, limit: int = 10) -> dict:
     """Lists resources associated with a specific source, such as core contributors or community."""
     limit = min(max(limit, 1), settings.max_page_size)
@@ -140,7 +158,10 @@ async def list_resources_by_source(source_title: str, limit: int = 10) -> dict:
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="get_repository_sync_status",
+    description="Get synchronization freshness and metadata for a repository-backed resource.",
+)
 async def get_repository_status(resource_id: str) -> dict:
     """Returns sync freshness and metadata for one tracked repository resource."""
     async with resource_service() as svc:
@@ -154,7 +175,10 @@ async def get_repository_status(resource_id: str) -> dict:
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="build_debugging_context",
+    description="Build issue-focused context by combining relevant resources and documentation routes for a debugging query.",
+)
 async def get_debugging_context(query: str, prefer_official_only: bool = False, limit: int = 8) -> dict:
     """Returns the best matching docs and resources for debugging a Cartesi issue or concept, with metadata and links for follow-up fetching."""
     limit = min(max(limit, 1), settings.max_page_size)
@@ -175,7 +199,10 @@ async def get_debugging_context(query: str, prefer_official_only: bool = False, 
         }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="get_knowledge_taxonomy",
+    description="Return the canonical taxonomy of known tag titles and source titles in the knowledge base.",
+)
 async def get_taxonomy() -> dict:
     """Returns available source names and tag names known to the knowledge base."""
     async with resource_service() as svc:
@@ -190,7 +217,10 @@ async def get_taxonomy() -> dict:
         }
     
 
-@mcp.tool()
+@mcp.tool(
+    name="summarize_knowledge_base",
+    description="Return high-level knowledge-base coverage, counts by type, and orientation guidance for follow-up retrieval.",
+)
 async def get_knowledge_base_summary() -> dict:
     """
     Returns a high-level overview of the knowledge base: counts by type,
