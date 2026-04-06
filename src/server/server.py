@@ -41,6 +41,9 @@ mcp = FastMCP(
         allowed_hosts=[
             "localhost",
             "127.0.0.1",
+            # Browsers and clients send Host with port (e.g. localhost:8008); bare localhost does not match.
+            "localhost:*",
+            "127.0.0.1:*",
             "cartesi-mcp.idogwuchinonso.com",
             # Accept the same host on any port (curl to :8001 sometimes includes the port in Host header).
             "cartesi-mcp.idogwuchinonso.com:*",
@@ -51,6 +54,9 @@ mcp = FastMCP(
         allowed_origins=[
             "http://localhost",
             "http://127.0.0.1",
+            # MCP Inspector and other local UIs use an explicit port (e.g. :6274).
+            "http://localhost:*",
+            "http://127.0.0.1:*",
             "http://cartesi-mcp.idogwuchinonso.com",
             "https://cartesi-mcp.idogwuchinonso.com",
         ],
