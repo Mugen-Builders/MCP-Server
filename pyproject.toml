@@ -8,6 +8,7 @@ dependencies = [
   "asyncpg==0.30.0",
   "greenlet>=3.3.2",
   "mcp[cli]==1.26.0",
+  "starlette>=0.46.0",
   "pydantic==2.11.7",
   "pydantic-settings==2.10.1",
   "sqlalchemy==2.0.43",
