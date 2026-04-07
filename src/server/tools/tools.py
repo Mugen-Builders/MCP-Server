@@ -591,6 +591,7 @@ async def prepare_cartesi_run_command(
     }
 
 
+
 @mcp.tool(
     name="send_input_to_application",
     description="Generate host-machine instructions for sending an input to a running Cartesi application through the InputBox using cast.",
@@ -675,6 +676,508 @@ async def send_input_to_application(
             f"Change into the relevant project directory on the user's machine if needed: `{project_path}`.",
             f"Run this command on the user's machine after replacing the shell variables with real values: `{cast_command}`",
             "If you need multiple distinct users to send transactions, reuse the same command with different private keys from the returned list.",
+        ],
+    }
+
+
+@mcp.tool(
+    name="prepare_erc20_deposit_instructions",
+    description="Generate host-machine instructions for depositing ERC20 tokens into a Cartesi application via ERC20Portal using cast: balance check, optional funding transfer, approve, and depositERC20Tokens.",
+)
+async def prepare_erc20_deposit_instructions(
+    application_address: str | None,
+    token_amount: str,
+    execution_layer_data: str = "0x",
+    token_contract_address: str | None = None,
+    rpc_url: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+    project_path: str = ".",
+) -> dict:
+    """
+    Returns cast command templates and an ordered workflow for ERC20 deposits.
+    Does not execute anything on the MCP host; the agent runs commands on the user's machine.
+    """
+    private_keys = get_default_local_privatekeys()
+    selected_private_key = private_keys[0]
+    exec_hex = (
+        normalize_input_payload_to_hex(execution_layer_data)
+        if execution_layer_data and execution_layer_data.strip()
+        else "0x"
+    )
+
+    token_ref = token_contract_address or "$test_token_contract_address"
+    app_ref = application_address or "$application_address"
+    rpc_ref = rpc_url or "$rpc_url"
+
+    balance_check_command = _command(
+        [
+            "cast",
+            "call",
+            token_ref,
+            "balanceOf(address)(uint256)",
+            "$holder_address",
+            "--rpc-url",
+            rpc_ref,
+        ]
+    )
+
+    transfer_to_depositor_command = _command(
+        [
+            "cast",
+            "send",
+            token_ref,
+            "transfer(address,uint256)",
+            "$depositor_address",
+            token_amount,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            "$funding_wallet_private_key",
+        ]
+    )
+
+    approve_command = _command(
+        [
+            "cast",
+            "send",
+            token_ref,
+            "approve(address,uint256)",
+            "$erc20_portal_address",
+            token_amount,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            selected_private_key,
+        ]
+    )
+
+    deposit_command = _command(
+        [
+            "cast",
+            "send",
+            "$erc20_portal_address",
+            "depositERC20Tokens(address,address,uint256,bytes)",
+            token_ref,
+            app_ref,
+            token_amount,
+            exec_hex,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            selected_private_key,
+        ]
+    )
+
+    holder_address_from_key_command = _command(
+        [
+            "cast",
+            "wallet",
+            "address",
+            "--private-key",
+            selected_private_key,
+        ]
+    )
+
+    warnings: list[str] = []
+    if application_address is None:
+        warnings.append(
+            "The application contract address is required before depositing. Obtain it from the running Cartesi application context."
+        )
+    if rpc_url is None:
+        warnings.append(
+            "The RPC URL is required. For stable v1.5.x the common default is `http://127.0.0.1:8545`; for versions that start with `2.0.0`, use the RPC URL from `cartesi run` output."
+        )
+    if token_contract_address is None:
+        warnings.append(
+            "No token address was provided: use the CLI-provided TestToken address from `cartesi address-book` (often minted to the first Anvil-style dev wallet) unless the user specifies another ERC20."
+        )
+
+    return {
+        "status": "success",
+        "summary": "Prepared host-side workflow for ERC20 deposits through ERC20Portal.",
+        "data": {
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "agent_workflow": [
+                "Run `cartesi address-book` in the project directory and record ERC20Portal and TestToken (or the user-chosen token) contract addresses.",
+                "Ensure the application logic knows which token address to expect for deposits (e.g. parse or compare against the deposited token) before relying on deposits in production.",
+                "Derive the depositor's Ethereum address from the private key that will sign approve/deposit (see `holder_address_from_key_command`), or use the user's provided depositor address consistently as `$holder_address` / `$depositor_address`.",
+                "Check the depositor's token balance with `balance_check_command` (read-only `cast call`; no private key). The ABI selector is standard ERC-20 `balanceOf(address)`.",
+                "If balance is zero or less than `token_amount`, ask the user for permission, then fund the depositor by sending tokens from any wallet that holds enough balance using `transfer_to_depositor_command` (replace `$funding_wallet_private_key` with that wallet's key). The Cartesi CLI TestToken is typically pre-minted to the first wallet in the local dev key bank; you can transfer from that wallet to the depositor.",
+                "Have the depositor approve the ERC20Portal to pull tokens: run `approve_command` with the depositor's private key.",
+                "Deposit into the application: run `deposit_command` with the same depositor private key. `execution_layer_data` is ABI-encoded `bytes` passed to the app (normalized hex below).",
+            ],
+            "default_token_guidance": {
+                "when_no_token_specified": "Use the TestToken entry from `cartesi address-book`. It is deployed and minted for local dev; the default funding wallet is usually the first key in the local wallet bank (same list as `send_input_to_application`).",
+                "transfer_source": "If another address must deposit, transfer TestToken from a funded wallet to `$depositor_address` using `transfer_to_depositor_command` after user consent.",
+            },
+            "requirements": {
+                "cast_install_check": [
+                    "command -v cast",
+                    "cast --version",
+                ],
+                "required_values": [
+                    "application_address",
+                    "rpc_url",
+                    "erc20_portal_address",
+                    "token_contract_address (or TestToken from address-book)",
+                    "token_amount (uint256, typically wei as a decimal string)",
+                    "depositor private key for approve and deposit",
+                    "funding wallet private key only if a transfer step is needed",
+                ],
+            },
+            "rpc_url_guidance": {
+                "stable_v1_5": "Usually `http://127.0.0.1:8545` for local dev flows.",
+                "version_starts_with_2_0_0": "Read the RPC URL from the output of `cartesi run` for the specific running application.",
+            },
+            "address_book_guidance": {
+                "command": "cartesi address-book",
+                "purpose": "Resolve ERC20Portal and TestToken (or other listed token) addresses for the active Cartesi dev stack.",
+                "target_contracts": ["ERC20Portal", "TestToken"],
+            },
+            "balance_check": {
+                "description": "Read-only check that the depositor address holds at least `token_amount` before approve/deposit. Replace `$holder_address` with the same address used as depositor.",
+                "command_template": balance_check_command,
+                "notes": [
+                    "This is `cast call`, not `cast send`: no transaction, no `--private-key`.",
+                    "Return value is the uint256 balance in the token's smallest unit (same unit as `token_amount`).",
+                ],
+            },
+            "execution_layer_data": {
+                "original": execution_layer_data,
+                "normalized_hex": exec_hex,
+                "normalization_rule": "Same as input payload normalization: valid `0x` hex is kept; otherwise UTF-8 encoded to hex. Empty input becomes `0x`.",
+            },
+            "token_amount": {
+                "value": token_amount,
+                "note": "Must match the ERC-20 `uint256` amount (almost always whole token wei). Use the same numeric string for transfer (if used), approve, and deposit.",
+            },
+            "private_keys": {
+                "default_depositor_signer": selected_private_key,
+                "all_default_local_private_keys": private_keys,
+                "usage_guidance": "Default depositor is the first dev key. Use another key for `funding_wallet_private_key` when transferring from a wallet that already holds the token.",
+            },
+            "holder_address_from_key_command": holder_address_from_key_command,
+            "cast_command_templates": {
+                "transfer_to_depositor": transfer_to_depositor_command,
+                "approve_erc20_portal": approve_command,
+                "deposit_erc20_tokens": deposit_command,
+            },
+            "requested_input": {
+                "application_address": application_address,
+                "token_amount": token_amount,
+                "token_contract_address": token_contract_address,
+                "execution_layer_data": execution_layer_data,
+                "rpc_url": rpc_url,
+                "project_path": project_path,
+            },
+        },
+        "warnings": warnings,
+        "next_steps": [
+            "Run `command -v cast` and `cast --version` on the user's machine.",
+            f"Change into the project directory if needed: `{project_path}`.",
+            "Run `cartesi address-book` and copy ERC20Portal and token (TestToken or user-specified) addresses into the commands.",
+            f"Obtain the depositor address: `{holder_address_from_key_command}` (or from the user's wallet).",
+            f"Check balance: `{balance_check_command}` — if insufficient, ask the user, then fund with `{transfer_to_depositor_command}`.",
+            f"Approve: `{approve_command}`.",
+            f"Deposit: `{deposit_command}`.",
+        ],
+    }
+
+
+@mcp.tool(
+    name="prepare_erc721_deposit_instructions",
+    description="Generate host-machine instructions for depositing one ERC721 token into a Cartesi application via ERC721Portal: ownership/balance checks, optional safeMint (owner key only), transferFrom, setApprovalForAll, and depositERC721Token.",
+)
+async def prepare_erc721_deposit_instructions(
+    application_address: str | None,
+    token_id: str,
+    token_uri: str = "ipfs://cartesi-local-test-nft",
+    base_layer_data: str = "0x",
+    execution_layer_data: str = "0x",
+    nft_contract_address: str | None = None,
+    rpc_url: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+    project_path: str = ".",
+) -> dict:
+    """
+    Streamlined ERC721 deposit workflow for local dev (TestNFT from address-book when unset).
+    """
+    private_keys = get_default_local_privatekeys()
+    owner_minter_private_key = private_keys[0]
+    depositor_private_key = private_keys[0]
+    base_hex = (
+        normalize_input_payload_to_hex(base_layer_data)
+        if base_layer_data and base_layer_data.strip()
+        else "0x"
+    )
+    exec_hex = (
+        normalize_input_payload_to_hex(execution_layer_data)
+        if execution_layer_data and execution_layer_data.strip()
+        else "0x"
+    )
+
+    nft_ref = nft_contract_address or "$test_nft_contract_address"
+    app_ref = application_address or "$application_address"
+    rpc_ref = rpc_url or "$rpc_url"
+
+    owner_of_cast_command = _command(
+        [
+            "cast",
+            "call",
+            nft_ref,
+            "ownerOf(uint256)(address)",
+            token_id,
+            "--rpc-url",
+            rpc_ref,
+        ]
+    )
+
+    balance_of_cast_command = _command(
+        [
+            "cast",
+            "call",
+            nft_ref,
+            "balanceOf(address)(uint256)",
+            "$holder_address",
+            "--rpc-url",
+            rpc_ref,
+        ]
+    )
+
+    calldata_owner_of_command = _command(["cast", "calldata", "ownerOf(uint256)", token_id])
+    # Do not wrap `$holder_address` with _command/shlex or the shell will not expand it.
+    calldata_balance_of_shell = 'cast calldata "balanceOf(address)" "$holder_address"'
+
+    curl_owner_of_eth_call = (
+        f"CALLDATA=$({calldata_owner_of_command}) && "
+        f'curl -s -X POST "{rpc_ref}" -H "Content-Type: application/json" '
+        '-d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"${nft_contract_address}\",\"data\":\"${CALLDATA}\"},\"latest\"],\"id\":1}"'
+    )
+
+    curl_balance_of_eth_call = (
+        f"CALLDATA=$({calldata_balance_of_shell}) && "
+        f'curl -s -X POST "{rpc_ref}" -H "Content-Type: application/json" '
+        '-d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"${nft_contract_address}\",\"data\":\"${CALLDATA}\"},\"latest\"],\"id\":1}"'
+    )
+
+    safe_mint_command = _command(
+        [
+            "cast",
+            "send",
+            nft_ref,
+            "safeMint(address,uint256,string)",
+            "$receiver_address",
+            token_id,
+            token_uri,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            owner_minter_private_key,
+        ]
+    )
+
+    transfer_from_command = _command(
+        [
+            "cast",
+            "send",
+            nft_ref,
+            "transferFrom(address,address,uint256)",
+            "$from_address",
+            "$to_address",
+            token_id,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            "$current_owner_private_key",
+        ]
+    )
+
+    set_approval_for_all_command = _command(
+        [
+            "cast",
+            "send",
+            nft_ref,
+            "setApprovalForAll(address,bool)",
+            "$erc721_portal_address",
+            "true",
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            depositor_private_key,
+        ]
+    )
+
+    deposit_erc721_command = _command(
+        [
+            "cast",
+            "send",
+            "$erc721_portal_address",
+            "depositERC721Token(address,address,uint256,bytes,bytes)",
+            nft_ref,
+            app_ref,
+            token_id,
+            base_hex,
+            exec_hex,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            depositor_private_key,
+        ]
+    )
+
+    holder_address_from_key_command = _command(
+        [
+            "cast",
+            "wallet",
+            "address",
+            "--private-key",
+            depositor_private_key,
+        ]
+    )
+
+    owner_address_from_key_command = _command(
+        [
+            "cast",
+            "wallet",
+            "address",
+            "--private-key",
+            owner_minter_private_key,
+        ]
+    )
+
+    warnings: list[str] = []
+    if application_address is None:
+        warnings.append(
+            "The application contract address is required before depositing. Obtain it from the running Cartesi application context."
+        )
+    if rpc_url is None:
+        warnings.append(
+            "The RPC URL is required. For stable v1.5.x the common default is `http://127.0.0.1:8545`; for versions that start with `2.0.0`, use the RPC URL from `cartesi run` output (not the example path `/anvil` unless your node exposes it)."
+        )
+    if nft_contract_address is None:
+        warnings.append(
+            "No NFT contract address was provided: use the CLI-provided TestNFT address from `cartesi address-book` unless the user specifies another ERC721."
+        )
+    warnings.append(
+        "All `safeMint` transactions must be signed only with the first default dev private key: that wallet is the TestNFT owner and the only address authorized to mint."
+    )
+
+    return {
+        "status": "success",
+        "summary": "Prepared host-side workflow for ERC721 deposits through ERC721Portal.",
+        "data": {
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "agent_workflow": [
+                "Run `cartesi address-book` and record ERC721Portal and TestNFT (or user NFT) addresses.",
+                "Ensure application logic can interpret the deposit (token contract address and `token_id`) using `base_layer_data` / `execution_layer_data` as needed.",
+                "Resolve `$holder_address` / depositor with `holder_address_from_key_command` (or the user's wallet). Export `nft_contract_address` in the shell when using curl one-liners.",
+                "Verify ownership of `token_id` with `owner_of_cast_command` or `curl_owner_of_eth_call`. Compare the returned address to the depositor. Optionally check `balance_of_cast_command` or `curl_balance_of_eth_call` for how many NFTs the depositor holds.",
+                "If the depositor does not own `token_id` and the id is free to mint, ask the user, then run `safe_mint_command` with `$receiver_address` set to the depositor — **only** the first default private key (`owner_minter_private_key`) may sign mints.",
+                "If the NFT is held by another address (including the minter wallet), move it to the depositor with `transfer_from_command`: set `$from_address`, `$to_address` (depositor), and `$current_owner_private_key` to the current owner's key.",
+                "With the depositor holding the NFT, run `set_approval_for_all_command` so ERC721Portal can operate on behalf of the depositor.",
+                "Deposit via `deposit_erc721_command` using the depositor's private key.",
+            ],
+            "default_token_guidance": {
+                "when_no_nft_specified": "Use TestNFT from `cartesi address-book`. Minting must use the first wallet in the local dev key bank (`owner_minter_private_key`).",
+                "token_uri": "Used only for `safeMint`; adjust `token_uri` if the contract or user requires a specific metadata URI.",
+            },
+            "requirements": {
+                "cast_install_check": [
+                    "command -v cast",
+                    "cast --version",
+                ],
+                "curl_install_check": [
+                    "command -v curl",
+                ],
+                "required_values": [
+                    "application_address",
+                    "rpc_url",
+                    "erc721_portal_address",
+                    "nft_contract_address (or TestNFT from address-book)",
+                    "token_id",
+                    "depositor private key for setApprovalForAll and deposit",
+                    "first default private key for safeMint only",
+                ],
+            },
+            "rpc_url_guidance": {
+                "stable_v1_5": "Usually `http://127.0.0.1:8545` for local dev.",
+                "version_starts_with_2_0_0": "Use the RPC URL from `cartesi run` for the running application.",
+            },
+            "address_book_guidance": {
+                "command": "cartesi address-book",
+                "purpose": "Resolve ERC721Portal and TestNFT addresses.",
+                "target_contracts": ["ERC721Portal", "TestNFT"],
+            },
+            "ownership_and_balance_checks": {
+                "cast_templates": {
+                    "owner_of_token_id": {
+                        "description": "Returns the owner of `token_id` (read-only).",
+                        "command_template": owner_of_cast_command,
+                    },
+                    "balance_of_address": {
+                        "description": "ERC721 `balanceOf` for how many tokens `$holder_address` holds.",
+                        "command_template": balance_of_cast_command,
+                    },
+                },
+                "curl_eth_call_templates": {
+                    "notes": [
+                        "These use JSON-RPC `eth_call`. Set shell variable `nft_contract_address` to the NFT contract (or substitute the literal address). `CALLDATA` is produced by `cast calldata` so the agent does not hand-encode the selector.",
+                        "For `curl_balance_of_eth_call`, `$holder_address` must be a checksummed or valid hex address inside the calldata step — run `cast calldata` with the concrete address after you know it.",
+                    ],
+                    "owner_of_one_liner": curl_owner_of_eth_call,
+                    "balance_of_one_liner": curl_balance_of_eth_call,
+                    "calldata_helpers": {
+                        "owner_of": calldata_owner_of_command,
+                        "balance_of": calldata_balance_of_shell,
+                    },
+                },
+            },
+            "base_layer_data": {
+                "original": base_layer_data,
+                "normalized_hex": base_hex,
+            },
+            "execution_layer_data": {
+                "original": execution_layer_data,
+                "normalized_hex": exec_hex,
+                "normalization_rule": "Same as input payload normalization; empty becomes `0x`.",
+            },
+            "token_id": {"value": token_id},
+            "private_keys": {
+                "owner_minter_only_for_safe_mint": owner_minter_private_key,
+                "default_depositor_signer": depositor_private_key,
+                "all_default_local_private_keys": private_keys,
+                "usage_guidance": "Never sign `safeMint` with a key other than `owner_minter_only_for_safe_mint` (first key). Use `default_depositor_signer` for setApprovalForAll and deposit; use other keys only as `current_owner_private_key` for `transferFrom` when moving the NFT to the depositor.",
+            },
+            "holder_address_from_key_command": holder_address_from_key_command,
+            "owner_address_from_key_command": owner_address_from_key_command,
+            "cast_command_templates": {
+                "safe_mint_to_receiver": safe_mint_command,
+                "transfer_from": transfer_from_command,
+                "set_approval_for_all_erc721_portal": set_approval_for_all_command,
+                "deposit_erc721_token": deposit_erc721_command,
+            },
+            "requested_input": {
+                "application_address": application_address,
+                "token_id": token_id,
+                "token_uri": token_uri,
+                "nft_contract_address": nft_contract_address,
+                "base_layer_data": base_layer_data,
+                "execution_layer_data": execution_layer_data,
+                "rpc_url": rpc_url,
+                "project_path": project_path,
+            },
+        },
+        "warnings": warnings,
+        "next_steps": [
+            "Run `command -v cast`, `cast --version`, and `command -v curl` on the user's machine.",
+            f"Change into the project directory if needed: `{project_path}`.",
+            "Run `cartesi address-book` and set ERC721Portal, TestNFT (or chosen NFT), and RPC URL.",
+            f"Check ownership: `{owner_of_cast_command}` or use the curl one-liner in `ownership_and_balance_checks.curl_eth_call_templates`.",
+            f"If needed, mint with `{safe_mint_command}` (first-key / owner only), then `{transfer_from_command}` if the NFT must move to the depositor.",
+            f"Approve portal: `{set_approval_for_all_command}`.",
+            f"Deposit: `{deposit_erc721_command}`.",
         ],
     }
 
