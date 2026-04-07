@@ -12,6 +12,30 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def _resolve_depositor_signing_key(
+    bank: list[str],
+    depositor_private_key: str | None,
+    depositor_wallet_index: int,
+) -> str:
+    """
+    Private key used for depositor-signed steps (approve, deposit, etc.).
+    If `depositor_private_key` is non-empty, it wins; otherwise use `bank[depositor_wallet_index]`.
+    """
+    if depositor_private_key is not None and str(depositor_private_key).strip():
+        return str(depositor_private_key).strip()
+    if depositor_wallet_index < 0 or depositor_wallet_index >= len(bank):
+        raise ValueError(
+            f"depositor_wallet_index must be in [0, {len(bank) - 1}] for this dev key bank; got {depositor_wallet_index}."
+        )
+    return bank[depositor_wallet_index]
+
+
+def _depositor_balance_holder_ref(depositor_address: str | None) -> str:
+    """Literal address for balance/read calls, or `$holder_address` to fill from `cast wallet address`."""
+    if depositor_address is not None and str(depositor_address).strip():
+        return str(depositor_address).strip()
+    return "$holder_address"
+
 
 # -----------------
 # MCP tools
@@ -682,7 +706,7 @@ async def send_input_to_application(
 
 @mcp.tool(
     name="prepare_erc20_deposit_instructions",
-    description="Generate host-machine instructions for depositing ERC20 tokens into a Cartesi application via ERC20Portal using cast: balance check, optional funding transfer, approve, and depositERC20Tokens.",
+    description="Generate host-machine instructions for depositing ERC20 tokens into a Cartesi application via ERC20Portal using cast: balance check, optional funding transfer, approve, and depositERC20Tokens. Depositor wallet is configurable via depositor_wallet_index, depositor_private_key, and optional depositor_address for read calls.",
 )
 async def prepare_erc20_deposit_instructions(
     application_address: str | None,
@@ -690,6 +714,9 @@ async def prepare_erc20_deposit_instructions(
     execution_layer_data: str = "0x",
     token_contract_address: str | None = None,
     rpc_url: str | None = None,
+    depositor_wallet_index: int = 0,
+    depositor_private_key: str | None = None,
+    depositor_address: str | None = None,
     cli_track: LOCAL_CLI_TRACK = "unknown",
     project_path: str = ".",
 ) -> dict:
@@ -698,7 +725,10 @@ async def prepare_erc20_deposit_instructions(
     Does not execute anything on the MCP host; the agent runs commands on the user's machine.
     """
     private_keys = get_default_local_privatekeys()
-    selected_private_key = private_keys[0]
+    selected_private_key = _resolve_depositor_signing_key(
+        private_keys, depositor_private_key, depositor_wallet_index
+    )
+    balance_holder_ref = _depositor_balance_holder_ref(depositor_address)
     exec_hex = (
         normalize_input_payload_to_hex(execution_layer_data)
         if execution_layer_data and execution_layer_data.strip()
@@ -715,7 +745,7 @@ async def prepare_erc20_deposit_instructions(
             "call",
             token_ref,
             "balanceOf(address)(uint256)",
-            "$holder_address",
+            balance_holder_ref,
             "--rpc-url",
             rpc_ref,
         ]
@@ -791,6 +821,10 @@ async def prepare_erc20_deposit_instructions(
         warnings.append(
             "No token address was provided: use the CLI-provided TestToken address from `cartesi address-book` (often minted to the first Anvil-style dev wallet) unless the user specifies another ERC20."
         )
+    if depositor_address is not None and str(depositor_address).strip():
+        warnings.append(
+            "When `depositor_address` is set, it must match the address derived from the depositor signing key (`holder_address_from_key_command`); otherwise balance checks and transfers will disagree."
+        )
 
     return {
         "status": "success",
@@ -801,7 +835,7 @@ async def prepare_erc20_deposit_instructions(
             "agent_workflow": [
                 "Run `cartesi address-book` in the project directory and record ERC20Portal and TestToken (or the user-chosen token) contract addresses.",
                 "Ensure the application logic knows which token address to expect for deposits (e.g. parse or compare against the deposited token) before relying on deposits in production.",
-                "Derive the depositor's Ethereum address from the private key that will sign approve/deposit (see `holder_address_from_key_command`), or use the user's provided depositor address consistently as `$holder_address` / `$depositor_address`.",
+                "Depositor wallet: use `depositor_wallet_index` into the dev key bank, or pass `depositor_private_key` to simulate another signer (overrides the index). Optionally pass `depositor_address` so balance checks use that literal address; otherwise use `holder_address_from_key_command` and treat that address as `$depositor_address` for transfers.",
                 "Check the depositor's token balance with `balance_check_command` (read-only `cast call`; no private key). The ABI selector is standard ERC-20 `balanceOf(address)`.",
                 "If balance is zero or less than `token_amount`, ask the user for permission, then fund the depositor by sending tokens from any wallet that holds enough balance using `transfer_to_depositor_command` (replace `$funding_wallet_private_key` with that wallet's key). The Cartesi CLI TestToken is typically pre-minted to the first wallet in the local dev key bank; you can transfer from that wallet to the depositor.",
                 "Have the depositor approve the ERC20Portal to pull tokens: run `approve_command` with the depositor's private key.",
@@ -836,7 +870,7 @@ async def prepare_erc20_deposit_instructions(
                 "target_contracts": ["ERC20Portal", "TestToken"],
             },
             "balance_check": {
-                "description": "Read-only check that the depositor address holds at least `token_amount` before approve/deposit. Replace `$holder_address` with the same address used as depositor.",
+                "description": "Read-only check that the depositor address holds at least `token_amount` before approve/deposit. Uses `depositor_address` when provided, otherwise the same address as `$holder_address` / `holder_address_from_key_command` output.",
                 "command_template": balance_check_command,
                 "notes": [
                     "This is `cast call`, not `cast send`: no transaction, no `--private-key`.",
@@ -852,10 +886,21 @@ async def prepare_erc20_deposit_instructions(
                 "value": token_amount,
                 "note": "Must match the ERC-20 `uint256` amount (almost always whole token wei). Use the same numeric string for transfer (if used), approve, and deposit.",
             },
+            "depositor_configuration": {
+                "depositor_wallet_index": depositor_wallet_index,
+                "depositor_private_key_source": "parameter" if (depositor_private_key and str(depositor_private_key).strip()) else "wallet_bank_index",
+                "depositor_address_for_reads": depositor_address,
+                "balance_check_uses_address": balance_holder_ref,
+                "notes": [
+                    "Change `depositor_wallet_index` (0-based into `all_default_local_private_keys`) to simulate deposits from different built-in dev wallets.",
+                    "Pass `depositor_private_key` to use a key outside the bank; it overrides `depositor_wallet_index` for signing.",
+                    "Pass `depositor_address` to pin balance/read calls to a specific hex address; if omitted, templates use `$holder_address` — set it from `holder_address_from_key_command` before running balance checks.",
+                ],
+            },
             "private_keys": {
-                "default_depositor_signer": selected_private_key,
+                "depositor_signer": selected_private_key,
                 "all_default_local_private_keys": private_keys,
-                "usage_guidance": "Default depositor is the first dev key. Use another key for `funding_wallet_private_key` when transferring from a wallet that already holds the token.",
+                "usage_guidance": "Depositor signs approve and deposit. Use `depositor_wallet_index` or `depositor_private_key` to switch wallets. Use another key for `funding_wallet_private_key` when transferring from a wallet that already holds the token.",
             },
             "holder_address_from_key_command": holder_address_from_key_command,
             "cast_command_templates": {
@@ -869,6 +914,9 @@ async def prepare_erc20_deposit_instructions(
                 "token_contract_address": token_contract_address,
                 "execution_layer_data": execution_layer_data,
                 "rpc_url": rpc_url,
+                "depositor_wallet_index": depositor_wallet_index,
+                "depositor_private_key_provided": bool(depositor_private_key and str(depositor_private_key).strip()),
+                "depositor_address": depositor_address,
                 "project_path": project_path,
             },
         },
@@ -877,7 +925,7 @@ async def prepare_erc20_deposit_instructions(
             "Run `command -v cast` and `cast --version` on the user's machine.",
             f"Change into the project directory if needed: `{project_path}`.",
             "Run `cartesi address-book` and copy ERC20Portal and token (TestToken or user-specified) addresses into the commands.",
-            f"Obtain the depositor address: `{holder_address_from_key_command}` (or from the user's wallet).",
+            f"Obtain the depositor address if needed: `{holder_address_from_key_command}`, or use the configured `depositor_address` for read-only balance checks.",
             f"Check balance: `{balance_check_command}` — if insufficient, ask the user, then fund with `{transfer_to_depositor_command}`.",
             f"Approve: `{approve_command}`.",
             f"Deposit: `{deposit_command}`.",
@@ -887,7 +935,7 @@ async def prepare_erc20_deposit_instructions(
 
 @mcp.tool(
     name="prepare_erc721_deposit_instructions",
-    description="Generate host-machine instructions for depositing one ERC721 token into a Cartesi application via ERC721Portal: ownership/balance checks, optional safeMint (owner key only), transferFrom, setApprovalForAll, and depositERC721Token.",
+    description="Generate host-machine instructions for depositing one ERC721 token into a Cartesi application via ERC721Portal: ownership/balance checks, optional safeMint (owner key only), transferFrom, setApprovalForAll, and depositERC721Token. Depositor wallet is configurable via depositor_wallet_index, depositor_private_key, and optional depositor_address for read calls.",
 )
 async def prepare_erc721_deposit_instructions(
     application_address: str | None,
@@ -897,6 +945,9 @@ async def prepare_erc721_deposit_instructions(
     execution_layer_data: str = "0x",
     nft_contract_address: str | None = None,
     rpc_url: str | None = None,
+    depositor_wallet_index: int = 0,
+    depositor_private_key: str | None = None,
+    depositor_address: str | None = None,
     cli_track: LOCAL_CLI_TRACK = "unknown",
     project_path: str = ".",
 ) -> dict:
@@ -905,7 +956,10 @@ async def prepare_erc721_deposit_instructions(
     """
     private_keys = get_default_local_privatekeys()
     owner_minter_private_key = private_keys[0]
-    depositor_private_key = private_keys[0]
+    depositor_key = _resolve_depositor_signing_key(
+        private_keys, depositor_private_key, depositor_wallet_index
+    )
+    balance_holder_ref = _depositor_balance_holder_ref(depositor_address)
     base_hex = (
         normalize_input_payload_to_hex(base_layer_data)
         if base_layer_data and base_layer_data.strip()
@@ -939,15 +993,21 @@ async def prepare_erc721_deposit_instructions(
             "call",
             nft_ref,
             "balanceOf(address)(uint256)",
-            "$holder_address",
+            balance_holder_ref,
             "--rpc-url",
             rpc_ref,
         ]
     )
 
     calldata_owner_of_command = _command(["cast", "calldata", "ownerOf(uint256)", token_id])
-    # Do not wrap `$holder_address` with _command/shlex or the shell will not expand it.
-    calldata_balance_of_shell = 'cast calldata "balanceOf(address)" "$holder_address"'
+    if balance_holder_ref == "$holder_address":
+        calldata_balance_of_shell = 'cast calldata "balanceOf(address)" "$holder_address"'
+        calldata_balance_for_curl = calldata_balance_of_shell
+    else:
+        calldata_balance_of_shell = _command(
+            ["cast", "calldata", "balanceOf(address)", balance_holder_ref]
+        )
+        calldata_balance_for_curl = calldata_balance_of_shell
 
     curl_owner_of_eth_call = (
         f"CALLDATA=$({calldata_owner_of_command}) && "
@@ -956,7 +1016,7 @@ async def prepare_erc721_deposit_instructions(
     )
 
     curl_balance_of_eth_call = (
-        f"CALLDATA=$({calldata_balance_of_shell}) && "
+        f"CALLDATA=$({calldata_balance_for_curl}) && "
         f'curl -s -X POST "{rpc_ref}" -H "Content-Type: application/json" '
         '-d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"${nft_contract_address}\",\"data\":\"${CALLDATA}\"},\"latest\"],\"id\":1}"'
     )
@@ -1004,7 +1064,7 @@ async def prepare_erc721_deposit_instructions(
             "--rpc-url",
             rpc_ref,
             "--private-key",
-            depositor_private_key,
+            depositor_key,
         ]
     )
 
@@ -1022,7 +1082,7 @@ async def prepare_erc721_deposit_instructions(
             "--rpc-url",
             rpc_ref,
             "--private-key",
-            depositor_private_key,
+            depositor_key,
         ]
     )
 
@@ -1032,7 +1092,7 @@ async def prepare_erc721_deposit_instructions(
             "wallet",
             "address",
             "--private-key",
-            depositor_private_key,
+            depositor_key,
         ]
     )
 
@@ -1062,6 +1122,10 @@ async def prepare_erc721_deposit_instructions(
     warnings.append(
         "All `safeMint` transactions must be signed only with the first default dev private key: that wallet is the TestNFT owner and the only address authorized to mint."
     )
+    if depositor_address is not None and str(depositor_address).strip():
+        warnings.append(
+            "When `depositor_address` is set, it must match the address derived from the depositor signing key (`holder_address_from_key_command`); otherwise ownership/balance reads and portal txs will disagree."
+        )
 
     return {
         "status": "success",
@@ -1072,9 +1136,9 @@ async def prepare_erc721_deposit_instructions(
             "agent_workflow": [
                 "Run `cartesi address-book` and record ERC721Portal and TestNFT (or user NFT) addresses.",
                 "Ensure application logic can interpret the deposit (token contract address and `token_id`) using `base_layer_data` / `execution_layer_data` as needed.",
-                "Resolve `$holder_address` / depositor with `holder_address_from_key_command` (or the user's wallet). Export `nft_contract_address` in the shell when using curl one-liners.",
+                "Configure depositor with `depositor_wallet_index`, `depositor_private_key`, and optionally `depositor_address` for read/balance calls. Resolve the signing address with `holder_address_from_key_command` when `depositor_address` is omitted. Export `nft_contract_address` in the shell when using curl one-liners.",
                 "Verify ownership of `token_id` with `owner_of_cast_command` or `curl_owner_of_eth_call`. Compare the returned address to the depositor. Optionally check `balance_of_cast_command` or `curl_balance_of_eth_call` for how many NFTs the depositor holds.",
-                "If the depositor does not own `token_id` and the id is free to mint, ask the user, then run `safe_mint_command` with `$receiver_address` set to the depositor — **only** the first default private key (`owner_minter_private_key`) may sign mints.",
+                "If the depositor does not own `token_id` and the id is free to mint, ask the user, then run `safe_mint_command` with `$receiver_address` set to the depositor address (from `depositor_address` or `holder_address_from_key_command`) — **only** the first default private key (`owner_minter_private_key`) may sign mints.",
                 "If the NFT is held by another address (including the minter wallet), move it to the depositor with `transfer_from_command`: set `$from_address`, `$to_address` (depositor), and `$current_owner_private_key` to the current owner's key.",
                 "With the depositor holding the NFT, run `set_approval_for_all_command` so ERC721Portal can operate on behalf of the depositor.",
                 "Deposit via `deposit_erc721_command` using the depositor's private key.",
@@ -1117,14 +1181,14 @@ async def prepare_erc721_deposit_instructions(
                         "command_template": owner_of_cast_command,
                     },
                     "balance_of_address": {
-                        "description": "ERC721 `balanceOf` for how many tokens `$holder_address` holds.",
+                        "description": "ERC721 `balanceOf` for the depositor address (literal `depositor_address` when set, else the same address as `holder_address_from_key_command` / `$holder_address`).",
                         "command_template": balance_of_cast_command,
                     },
                 },
                 "curl_eth_call_templates": {
                     "notes": [
                         "These use JSON-RPC `eth_call`. Set shell variable `nft_contract_address` to the NFT contract (or substitute the literal address). `CALLDATA` is produced by `cast calldata` so the agent does not hand-encode the selector.",
-                        "For `curl_balance_of_eth_call`, `$holder_address` must be a checksummed or valid hex address inside the calldata step — run `cast calldata` with the concrete address after you know it.",
+                        "For `curl_balance_of_eth_call` without `depositor_address`, ensure `$holder_address` is set in the shell to the depositor address before running the calldata subcommand.",
                     ],
                     "owner_of_one_liner": curl_owner_of_eth_call,
                     "balance_of_one_liner": curl_balance_of_eth_call,
@@ -1144,11 +1208,22 @@ async def prepare_erc721_deposit_instructions(
                 "normalization_rule": "Same as input payload normalization; empty becomes `0x`.",
             },
             "token_id": {"value": token_id},
+            "depositor_configuration": {
+                "depositor_wallet_index": depositor_wallet_index,
+                "depositor_private_key_source": "parameter" if (depositor_private_key and str(depositor_private_key).strip()) else "wallet_bank_index",
+                "depositor_address_for_reads": depositor_address,
+                "balance_check_uses_address": balance_holder_ref,
+                "notes": [
+                    "Use `depositor_wallet_index` to pick a different built-in dev wallet for setApprovalForAll and deposit.",
+                    "Pass `depositor_private_key` to sign as a key outside the bank; it overrides `depositor_wallet_index`.",
+                    "Pass `depositor_address` to pin balance/curl reads to a specific address; it must match the depositor signer address or reads and txs will disagree.",
+                ],
+            },
             "private_keys": {
                 "owner_minter_only_for_safe_mint": owner_minter_private_key,
-                "default_depositor_signer": depositor_private_key,
+                "depositor_signer": depositor_key,
                 "all_default_local_private_keys": private_keys,
-                "usage_guidance": "Never sign `safeMint` with a key other than `owner_minter_only_for_safe_mint` (first key). Use `default_depositor_signer` for setApprovalForAll and deposit; use other keys only as `current_owner_private_key` for `transferFrom` when moving the NFT to the depositor.",
+                "usage_guidance": "Never sign `safeMint` with a key other than `owner_minter_only_for_safe_mint` (first key). Use `depositor_signer` for setApprovalForAll and deposit; use other keys only as `current_owner_private_key` for `transferFrom` when moving the NFT to the depositor.",
             },
             "holder_address_from_key_command": holder_address_from_key_command,
             "owner_address_from_key_command": owner_address_from_key_command,
@@ -1166,6 +1241,9 @@ async def prepare_erc721_deposit_instructions(
                 "base_layer_data": base_layer_data,
                 "execution_layer_data": execution_layer_data,
                 "rpc_url": rpc_url,
+                "depositor_wallet_index": depositor_wallet_index,
+                "depositor_private_key_provided": bool(depositor_private_key and str(depositor_private_key).strip()),
+                "depositor_address": depositor_address,
                 "project_path": project_path,
             },
         },
@@ -1174,6 +1252,7 @@ async def prepare_erc721_deposit_instructions(
             "Run `command -v cast`, `cast --version`, and `command -v curl` on the user's machine.",
             f"Change into the project directory if needed: `{project_path}`.",
             "Run `cartesi address-book` and set ERC721Portal, TestNFT (or chosen NFT), and RPC URL.",
+            f"Confirm depositor address (configured or via `{holder_address_from_key_command}`) matches balance/ownership checks.",
             f"Check ownership: `{owner_of_cast_command}` or use the curl one-liner in `ownership_and_balance_checks.curl_eth_call_templates`.",
             f"If needed, mint with `{safe_mint_command}` (first-key / owner only), then `{transfer_from_command}` if the NFT must move to the depositor.",
             f"Approve portal: `{set_approval_for_all_command}`.",
