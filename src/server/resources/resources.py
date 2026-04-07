@@ -147,15 +147,33 @@ async def resources_catalog() -> dict:
                 "use_for": "Interact with a running Cartesi application by preparing InputBox/cast calls.",
             },
             {
+                "method": "prepare_erc20_deposit_instructions",
+                "use_for": "Prepare cast-based ERC20 deposit workflow (balance check, transfer, approve, ERC20Portal deposit) on the user's machine.",
+            },
+            {
                 "method": "get_cartesi_app_logic_guidance",
                 "use_for": "Get implementation guidance for deposits, vouchers, notices, reports, and portal flows.",
+            },
+        ],
+        "prompts": [
+            {
+                "method": "debug_cartesi_issue",
+                "use_for": "Structured starting point for debugging a Cartesi issue using curated knowledge.",
+            },
+            {
+                "method": "find_cartesi_docs",
+                "use_for": "Guide discovery of documentation routes for a Cartesi topic.",
+            },
+            {
+                "method": "explain_repository_context",
+                "use_for": "Summarize a tracked repository resource and adjacent context.",
             },
         ],
         "next_steps": [
             "Start with summarize_knowledge_base and get_knowledge_taxonomy to orient and pick filters.",
             "Use search_knowledge_resources or search_documentation_routes to find relevant items.",
             "Use get_resource_detail or cartesi://resources/{resource_id} for detailed resource payloads.",
-            "If your task is Cartesi app lifecycle operations, use prepare_cartesi_create_command, prepare_cartesi_build_command, prepare_cartesi_run_command, and send_input_to_application as appropriate.",
+            "If your task is Cartesi app lifecycle operations, use prepare_cartesi_create_command, prepare_cartesi_build_command, prepare_cartesi_run_command, send_input_to_application, and prepare_erc20_deposit_instructions when depositing ERC20 tokens.",
         ],
     }
 
