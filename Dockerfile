@@ -2,7 +2,7 @@
 # Production-oriented image: reproducible base, non-root runtime, minimal attack surface.
 
 ARG PYTHON_VERSION=3.12
-ARG PYTHON_IMAGE=python:${PYTHON_VERSION}-slim-bookworm
+ARG PYTHON_IMAGE=python:${PYTHON_VERSION}-slim-trixie
 
 # -----------------------------------------------------------------------------
 # Builder: resolve and install dependencies into an isolated virtualenv (no dev).
