@@ -155,6 +155,10 @@ async def resources_catalog() -> dict:
                 "use_for": "Prepare cast/curl-based ERC721 deposit workflow (ownerOf/balanceOf, safeMint, transferFrom, setApprovalForAll, ERC721Portal deposit) on the user's machine.",
             },
             {
+                "method": "prepare_erc1155_deposit_instructions",
+                "use_for": "Prepare cast/curl-based ERC1155 single deposit (balanceOf, mint, safeTransferFrom, setApprovalForAll, ERC1155SinglePortal) on the user's machine.",
+            },
+            {
                 "method": "get_cartesi_app_logic_guidance",
                 "use_for": "Get implementation guidance for deposits, vouchers, notices, reports, and portal flows.",
             },
@@ -177,7 +181,7 @@ async def resources_catalog() -> dict:
             "Start with summarize_knowledge_base and get_knowledge_taxonomy to orient and pick filters.",
             "Use search_knowledge_resources or search_documentation_routes to find relevant items.",
             "Use get_resource_detail or cartesi://resources/{resource_id} for detailed resource payloads.",
-            "If your task is Cartesi app lifecycle operations, use prepare_cartesi_create_command, prepare_cartesi_build_command, prepare_cartesi_run_command, send_input_to_application, prepare_erc20_deposit_instructions for ERC20, and prepare_erc721_deposit_instructions for ERC721.",
+            "If your task is Cartesi app lifecycle operations, use prepare_cartesi_create_command, prepare_cartesi_build_command, prepare_cartesi_run_command, send_input_to_application, prepare_erc20_deposit_instructions for ERC20, prepare_erc721_deposit_instructions for ERC721, and prepare_erc1155_deposit_instructions for ERC1155 single deposits.",
         ],
     }
 

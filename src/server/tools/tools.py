@@ -1261,3 +1261,311 @@ async def prepare_erc721_deposit_instructions(
     }
 
 
+@mcp.tool(
+    name="prepare_erc1155_deposit_instructions",
+    description="Generate host-machine instructions for depositing a single ERC1155 id/amount via ERC1155SinglePortal: balance check, mint (first wallet only), safeTransferFrom to depositor, setApprovalForAll, depositSingleERC1155Token. Uses TestMultiToken from address-book when unset. Depositor configurable via depositor_wallet_index, depositor_private_key, depositor_address.",
+)
+async def prepare_erc1155_deposit_instructions(
+    application_address: str | None,
+    token_id: str,
+    token_amount: str,
+    base_layer_data: str = "0x",
+    execution_layer_data: str = "0x",
+    mint_and_transfer_data: str = "0x",
+    multi_token_contract_address: str | None = None,
+    rpc_url: str | None = None,
+    depositor_wallet_index: int = 0,
+    depositor_private_key: str | None = None,
+    depositor_address: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+    project_path: str = ".",
+) -> dict:
+    """
+    ERC1155 single-token deposit workflow for local dev (TestMultiToken when unset).
+    """
+    private_keys = get_default_local_privatekeys()
+    minter_private_key = private_keys[0]
+    depositor_key = _resolve_depositor_signing_key(
+        private_keys, depositor_private_key, depositor_wallet_index
+    )
+    balance_holder_ref = _depositor_balance_holder_ref(depositor_address)
+    base_hex = (
+        normalize_input_payload_to_hex(base_layer_data)
+        if base_layer_data and base_layer_data.strip()
+        else "0x"
+    )
+    exec_hex = (
+        normalize_input_payload_to_hex(execution_layer_data)
+        if execution_layer_data and execution_layer_data.strip()
+        else "0x"
+    )
+    data_hex = (
+        normalize_input_payload_to_hex(mint_and_transfer_data)
+        if mint_and_transfer_data and mint_and_transfer_data.strip()
+        else "0x"
+    )
+
+    token_ref = multi_token_contract_address or "$test_multi_token_contract_address"
+    app_ref = application_address or "$application_address"
+    rpc_ref = rpc_url or "$rpc_url"
+
+    balance_check_command = _command(
+        [
+            "cast",
+            "call",
+            token_ref,
+            "balanceOf(address,uint256)(uint256)",
+            balance_holder_ref,
+            token_id,
+            "--rpc-url",
+            rpc_ref,
+        ]
+    )
+
+    if balance_holder_ref == "$holder_address":
+        calldata_balance_shell = (
+            f'cast calldata "balanceOf(address,uint256)" "$holder_address" {token_id}'
+        )
+        calldata_balance_for_curl = calldata_balance_shell
+    else:
+        calldata_balance_shell = _command(
+            ["cast", "calldata", "balanceOf(address,uint256)", balance_holder_ref, token_id]
+        )
+        calldata_balance_for_curl = calldata_balance_shell
+
+    curl_balance_eth_call = (
+        f"CALLDATA=$({calldata_balance_for_curl}) && "
+        f'curl -s -X POST "{rpc_ref}" -H "Content-Type: application/json" '
+        '-d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"${multi_token_contract_address}\",\"data\":\"${CALLDATA}\"},\"latest\"],\"id\":1}"'
+    )
+
+    mint_command = _command(
+        [
+            "cast",
+            "send",
+            token_ref,
+            "mint(address,uint256,uint256,bytes)",
+            "$mint_receiver_address",
+            token_id,
+            token_amount,
+            data_hex,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            minter_private_key,
+        ]
+    )
+
+    safe_transfer_from_command = _command(
+        [
+            "cast",
+            "send",
+            token_ref,
+            "safeTransferFrom(address,address,uint256,uint256,bytes)",
+            "$from_address",
+            "$to_address",
+            token_id,
+            token_amount,
+            data_hex,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            "$operator_private_key",
+        ]
+    )
+
+    set_approval_for_all_command = _command(
+        [
+            "cast",
+            "send",
+            token_ref,
+            "setApprovalForAll(address,bool)",
+            "$erc1155_single_portal_address",
+            "true",
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            depositor_key,
+        ]
+    )
+
+    deposit_single_command = _command(
+        [
+            "cast",
+            "send",
+            "$erc1155_single_portal_address",
+            "depositSingleERC1155Token(address,address,uint256,uint256,bytes,bytes)",
+            token_ref,
+            app_ref,
+            token_id,
+            token_amount,
+            base_hex,
+            exec_hex,
+            "--rpc-url",
+            rpc_ref,
+            "--private-key",
+            depositor_key,
+        ]
+    )
+
+    holder_address_from_key_command = _command(
+        [
+            "cast",
+            "wallet",
+            "address",
+            "--private-key",
+            depositor_key,
+        ]
+    )
+
+    minter_address_from_key_command = _command(
+        [
+            "cast",
+            "wallet",
+            "address",
+            "--private-key",
+            minter_private_key,
+        ]
+    )
+
+    warnings: list[str] = []
+    if application_address is None:
+        warnings.append(
+            "The application contract address is required before depositing. Obtain it from the running Cartesi application context."
+        )
+    if rpc_url is None:
+        warnings.append(
+            "The RPC URL is required. For stable v1.5.x the common default is `http://127.0.0.1:8545`; for versions that start with `2.0.0`, use the RPC URL from `cartesi run` output."
+        )
+    if multi_token_contract_address is None:
+        warnings.append(
+            "No multi-token contract address was provided: use the CLI-provided TestMultiToken address from `cartesi address-book` unless the user specifies another ERC1155."
+        )
+    warnings.append(
+        "All `mint` transactions on TestMultiToken must be signed only with the first default dev private key (minter/owner); use `safeTransferFrom` to move balances to the depositor."
+    )
+    if depositor_address is not None and str(depositor_address).strip():
+        warnings.append(
+            "When `depositor_address` is set, it must match the address derived from the depositor signing key (`holder_address_from_key_command`); otherwise balance checks and transfers will disagree."
+        )
+
+    return {
+        "status": "success",
+        "summary": "Prepared host-side workflow for ERC1155 single deposits through ERC1155SinglePortal.",
+        "data": {
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "agent_workflow": [
+                "Run `cartesi address-book` and record ERC1155SinglePortal and TestMultiToken (or user ERC1155) addresses.",
+                "Ensure application logic can interpret the deposit (token contract, `token_id`, and `token_amount`).",
+                "Configure depositor with `depositor_wallet_index`, `depositor_private_key`, and optionally `depositor_address` for reads. Resolve signing address with `holder_address_from_key_command` when `depositor_address` is omitted.",
+                "Check `balanceOf` for `(depositor, token_id)` using `balance_check_command` or `curl_balance_eth_call`. Compare to `token_amount` required for the deposit.",
+                "If balance is insufficient, ask the user, then `mint` using `mint_command`: signer **must** be the first dev key. Set `$mint_receiver_address` to the minter address (`minter_address_from_key_command`) so tokens are minted to the default wallet, then move them with `safe_transfer_from_command`.",
+                "Run `safe_transfer_from_command` with `$from_address` = minter, `$to_address` = depositor, `$operator_private_key` = minter key, same `token_id`, `token_amount`, and `mint_and_transfer_data` bytes.",
+                "Depositor calls `set_approval_for_all_command` approving ERC1155SinglePortal (`true`).",
+                "Depositor calls `deposit_single_command` on ERC1155SinglePortal with base-layer and execution-layer bytes.",
+            ],
+            "default_token_guidance": {
+                "when_no_token_specified": "Use TestMultiToken from `cartesi address-book`. Mint only with the first wallet in the dev key bank.",
+                "mint_then_transfer": "Mint to the minter (first wallet), then `safeTransferFrom` minter → depositor before portal approval and deposit.",
+            },
+            "requirements": {
+                "cast_install_check": ["command -v cast", "cast --version"],
+                "curl_install_check": ["command -v curl"],
+                "required_values": [
+                    "application_address",
+                    "rpc_url",
+                    "erc1155_single_portal_address",
+                    "multi_token_contract_address (or TestMultiToken from address-book)",
+                    "token_id",
+                    "token_amount",
+                    "minter private key (first dev key) for mint and for safeTransferFrom from minter",
+                    "depositor private key for setApprovalForAll and depositSingleERC1155Token",
+                ],
+            },
+            "rpc_url_guidance": {
+                "stable_v1_5": "Usually `http://127.0.0.1:8545` for local dev.",
+                "version_starts_with_2_0_0": "Use the RPC URL from `cartesi run` for the running application.",
+            },
+            "address_book_guidance": {
+                "command": "cartesi address-book",
+                "purpose": "Resolve ERC1155SinglePortal and TestMultiToken addresses.",
+                "target_contracts": ["ERC1155SinglePortal", "TestMultiToken"],
+            },
+            "balance_check": {
+                "description": "ERC1155 `balanceOf(address,uint256)` for the depositor and `token_id`.",
+                "command_template": balance_check_command,
+                "curl_eth_call_one_liner": curl_balance_eth_call,
+                "curl_notes": [
+                    "Set `multi_token_contract_address` in the shell (or substitute in the JSON `to` field).",
+                    "Without `depositor_address`, export `holder_address` before running the calldata subcommand.",
+                ],
+            },
+            "mint_and_transfer_data": {
+                "original": mint_and_transfer_data,
+                "normalized_hex": data_hex,
+                "note": "Used as the trailing `bytes` argument for both `mint` and `safeTransferFrom` when the contract expects extra data.",
+            },
+            "base_layer_data": {
+                "original": base_layer_data,
+                "normalized_hex": base_hex,
+            },
+            "execution_layer_data": {
+                "original": execution_layer_data,
+                "normalized_hex": exec_hex,
+            },
+            "token_id": {"value": token_id},
+            "token_amount": {"value": token_amount},
+            "depositor_configuration": {
+                "depositor_wallet_index": depositor_wallet_index,
+                "depositor_private_key_source": "parameter" if (depositor_private_key and str(depositor_private_key).strip()) else "wallet_bank_index",
+                "depositor_address_for_reads": depositor_address,
+                "balance_check_uses_address": balance_holder_ref,
+                "notes": [
+                    "Use `depositor_wallet_index` or `depositor_private_key` to simulate deposits from different wallets.",
+                    "`depositor_address` pins read-only balance/curl checks to a literal address; it must match the depositor signer.",
+                ],
+            },
+            "private_keys": {
+                "minter_owner_only_for_mint": minter_private_key,
+                "depositor_signer": depositor_key,
+                "all_default_local_private_keys": private_keys,
+                "usage_guidance": "Sign `mint` only with `minter_owner_only_for_mint`. Sign `safeTransferFrom` from minter→depositor with the minter key. Sign `setApprovalForAll` and `depositSingleERC1155Token` with `depositor_signer`.",
+            },
+            "holder_address_from_key_command": holder_address_from_key_command,
+            "minter_address_from_key_command": minter_address_from_key_command,
+            "cast_command_templates": {
+                "mint": mint_command,
+                "safe_transfer_from": safe_transfer_from_command,
+                "set_approval_for_all_erc1155_single_portal": set_approval_for_all_command,
+                "deposit_single_erc1155_token": deposit_single_command,
+            },
+            "requested_input": {
+                "application_address": application_address,
+                "token_id": token_id,
+                "token_amount": token_amount,
+                "multi_token_contract_address": multi_token_contract_address,
+                "base_layer_data": base_layer_data,
+                "execution_layer_data": execution_layer_data,
+                "mint_and_transfer_data": mint_and_transfer_data,
+                "rpc_url": rpc_url,
+                "depositor_wallet_index": depositor_wallet_index,
+                "depositor_private_key_provided": bool(depositor_private_key and str(depositor_private_key).strip()),
+                "depositor_address": depositor_address,
+                "project_path": project_path,
+            },
+        },
+        "warnings": warnings,
+        "next_steps": [
+            "Run `command -v cast`, `cast --version`, and `command -v curl` on the user's machine.",
+            f"Change into the project directory if needed: `{project_path}`.",
+            "Run `cartesi address-book` and set ERC1155SinglePortal, TestMultiToken (or chosen ERC1155), and RPC URL.",
+            f"Confirm depositor address via `{holder_address_from_key_command}` or configured `depositor_address`.",
+            f"Check balance: `{balance_check_command}` or `{curl_balance_eth_call}`.",
+            f"If needed: `{mint_command}` (first key only), then `{safe_transfer_from_command}` (minter signs, from=minter, to=depositor).",
+            f"Approve: `{set_approval_for_all_command}`.",
+            f"Deposit: `{deposit_single_command}`.",
+        ],
+    }
+
+
