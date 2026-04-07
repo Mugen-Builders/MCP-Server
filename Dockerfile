@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 # Production-oriented image: reproducible base, non-root runtime, minimal attack surface.
 
 ARG PYTHON_VERSION=3.12
