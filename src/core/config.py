@@ -1,7 +1,45 @@
 from functools import lru_cache
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def normalize_database_url_for_async(url: str) -> str:
+    u = url.strip()
+    if u.startswith("postgres://"):
+        u = "postgresql://" + u[len("postgres://") :]
+    if u.startswith("postgresql://") and not u.startswith("postgresql+"):
+        u = "postgresql+asyncpg://" + u[len("postgresql://") :]
+
+    # asyncpg does not accept sslmode=..., convert psycopg-style URLs.
+    if u.startswith("postgresql+asyncpg://"):
+        parsed = urlsplit(u)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        has_ssl = any(key == "ssl" for key, _ in query)
+        if not has_ssl:
+            normalized_query: list[tuple[str, str]] = []
+            for key, value in query:
+                if key != "sslmode":
+                    normalized_query.append((key, value))
+                    continue
+
+                mode = value.strip().lower()
+                if mode == "disable":
+                    normalized_query.append(("ssl", "false"))
+                else:
+                    normalized_query.append(("ssl", "true"))
+
+            u = urlunsplit(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    urlencode(normalized_query, doseq=True),
+                    parsed.fragment,
+                )
+            )
+    return u
 
 
 class Settings(BaseSettings):
@@ -19,6 +57,13 @@ class Settings(BaseSettings):
     max_page_size: int = Field(default=50, alias="MAX_PAGE_SIZE")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_database_url(cls, v: object) -> object:
+        if not isinstance(v, str):
+            return v
+        return normalize_database_url_for_async(v)
 
 
 @lru_cache(maxsize=1)

@@ -21,7 +21,7 @@ Knowledge responses are **metadata and links** (titles, URIs, `canonical_url`, d
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and adjust. Defaults and field names are defined in `src/core/config.py` (notably `DATABASE_URL`, `APP_HOST`, `APP_PORT`, `MCP_BASE_URL`, pagination limits).
+Copy `.env.example` to `.env` and adjust. Defaults and field names are defined in `src/core/config.py` (notably `DATABASE_URL`, `APP_HOST`, `APP_PORT`, `MCP_BASE_URL`, pagination limits). For PostgreSQL URLs, `postgres://...` is normalized to `postgresql+asyncpg://...`, and `sslmode` is translated to asyncpg-compatible `ssl` (for example, `sslmode=disable` becomes `ssl=false`).
 
 ## Install
 

@@ -1,0 +1,77 @@
+name: Deploy Release to Fly.io
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  FLY_APP_NAME: cartesi-mcp-server
+  FLY_ORG: mugen-builders
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract release version
+        id: version
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Sync production secrets to Fly.io
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APP_NAME: ${{ secrets.APP_NAME }}
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_HOST: ${{ secrets.APP_HOST }}
+          APP_PORT: ${{ secrets.APP_PORT }}
+          APP_LOG_LEVEL: ${{ secrets.APP_LOG_LEVEL }}
+          MCP_BASE_URL: ${{ secrets.MCP_BASE_URL }}
+          DEFAULT_PAGE_SIZE: ${{ secrets.DEFAULT_PAGE_SIZE }}
+          MAX_PAGE_SIZE: ${{ secrets.MAX_PAGE_SIZE }}
+          APP_ENV: production
+        run: |
+          flyctl secrets set \
+            --app "$FLY_APP_NAME" \
+            --stage \
+            DATABASE_URL="$DATABASE_URL" \
+            APP_NAME="$APP_NAME" \
+            APP_ENV="$APP_ENV" \
+            APP_HOST="$APP_HOST" \
+            APP_PORT="$APP_PORT" \
+            APP_LOG_LEVEL="$APP_LOG_LEVEL" \
+            MCP_BASE_URL="$MCP_BASE_URL" \
+            DEFAULT_PAGE_SIZE="$DEFAULT_PAGE_SIZE" \
+            MAX_PAGE_SIZE="$MAX_PAGE_SIZE" \
+            APP_ENV="$APP_ENV"
+
+
+      - name: Deploy release image to existing Fly.io app
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy \
+            --app "$FLY_APP_NAME" \
+            --image "$IMAGE_NAME:${{ steps.version.outputs.version }}" \
+            --strategy rolling \
+            --wait-timeout 300
