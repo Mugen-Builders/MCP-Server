@@ -12,33 +12,25 @@ def normalize_database_url_for_async(url: str) -> str:
     if u.startswith("postgresql://") and not u.startswith("postgresql+"):
         u = "postgresql+asyncpg://" + u[len("postgresql://") :]
 
-    # asyncpg does not accept sslmode=..., convert psycopg-style URLs.
+    # SQLAlchemy's asyncpg dialect forwards URL query params as kwargs to
+    # asyncpg's connect(). asyncpg.connect() accepts `ssl` but not `sslmode`,
+    # so rename sslmode→ssl while keeping the value as a valid SSLMode string
+    # (disable, allow, prefer, require, verify-ca, verify-full).
     if u.startswith("postgresql+asyncpg://"):
         parsed = urlsplit(u)
         query = parse_qsl(parsed.query, keep_blank_values=True)
-        has_ssl = any(key == "ssl" for key, _ in query)
-        if not has_ssl:
-            normalized_query: list[tuple[str, str]] = []
-            for key, value in query:
-                if key != "sslmode":
-                    normalized_query.append((key, value))
-                    continue
-
-                mode = value.strip().lower()
-                if mode == "disable":
-                    normalized_query.append(("ssl", "false"))
-                else:
-                    normalized_query.append(("ssl", "true"))
-
-            u = urlunsplit(
-                (
-                    parsed.scheme,
-                    parsed.netloc,
-                    parsed.path,
-                    urlencode(normalized_query, doseq=True),
-                    parsed.fragment,
-                )
-            )
+        if any(key == "sslmode" for key, _ in query):
+            query = [
+                ("ssl", value) if key == "sslmode" else (key, value)
+                for key, value in query
+            ]
+            u = urlunsplit((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                urlencode(query, doseq=True),
+                parsed.fragment,
+            ))
     return u
 
 
