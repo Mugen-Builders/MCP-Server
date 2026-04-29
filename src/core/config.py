@@ -1,7 +1,7 @@
 from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     )
     default_page_size: int = Field(default=10, alias="DEFAULT_PAGE_SIZE")
     max_page_size: int = Field(default=50, alias="MAX_PAGE_SIZE")
+    # Stored as raw strings so pydantic-settings does not attempt JSON-decoding.
+    # Use the computed properties extra_allowed_hosts / extra_allowed_origins for the parsed lists.
+    extra_allowed_hosts_raw: str = Field(default="", alias="EXTRA_ALLOWED_HOSTS")
+    extra_allowed_origins_raw: str = Field(default="", alias="EXTRA_ALLOWED_ORIGINS")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -56,6 +60,16 @@ class Settings(BaseSettings):
         if not isinstance(v, str):
             return v
         return normalize_database_url_for_async(v)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def extra_allowed_hosts(self) -> list[str]:
+        return [h.strip() for h in self.extra_allowed_hosts_raw.split(",") if h.strip()]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def extra_allowed_origins(self) -> list[str]:
+        return [o.strip() for o in self.extra_allowed_origins_raw.split(",") if o.strip()]
 
 
 @lru_cache(maxsize=1)

@@ -16,6 +16,28 @@ from src.domain.resource_service import ResourceService
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+_DEV_ALLOWED_HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    # Browsers and clients send Host with port (e.g. localhost:8008); bare localhost does not match.
+    "localhost:*",
+    "127.0.0.1:*",
+]
+
+_DEV_ALLOWED_ORIGINS = [
+    "http://localhost",
+    "http://127.0.0.1",
+    # MCP Inspector and other local UIs use an explicit port (e.g. :6274).
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+]
+
+# In production, drop localhost entries — they have no legitimate use and
+# http://localhost:* in allowed_origins lets any local web page call the production server.
+_is_production = settings.app_env == "production"
+_BASE_ALLOWED_HOSTS = [] if _is_production else _DEV_ALLOWED_HOSTS
+_BASE_ALLOWED_ORIGINS = [] if _is_production else _DEV_ALLOWED_ORIGINS
+
 mcp = FastMCP(
     settings.app_name,
     instructions=(
@@ -38,28 +60,8 @@ mcp = FastMCP(
     port=settings.app_port,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "localhost",
-            "127.0.0.1",
-            # Browsers and clients send Host with port (e.g. localhost:8008); bare localhost does not match.
-            "localhost:*",
-            "127.0.0.1:*",
-            "cartesi-mcp.idogwuchinonso.com",
-            # Accept the same host on any port (curl to :8001 sometimes includes the port in Host header).
-            "cartesi-mcp.idogwuchinonso.com:*",
-            "cartesi-mcp.idogwuchinonso.com:80",
-            "cartesi-mcp.idogwuchinonso.com:443",
-            "cartesi-mcp.idogwuchinonso.com:8001",
-        ],
-        allowed_origins=[
-            "http://localhost",
-            "http://127.0.0.1",
-            # MCP Inspector and other local UIs use an explicit port (e.g. :6274).
-            "http://localhost:*",
-            "http://127.0.0.1:*",
-            "http://cartesi-mcp.idogwuchinonso.com",
-            "https://cartesi-mcp.idogwuchinonso.com",
-        ],
+        allowed_hosts=_BASE_ALLOWED_HOSTS + settings.extra_allowed_hosts,
+        allowed_origins=_BASE_ALLOWED_ORIGINS + settings.extra_allowed_origins,
     ),
 )
 
