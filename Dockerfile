@@ -68,6 +68,6 @@ STOPSIGNAL SIGTERM
 # Uses APP_HOST / APP_PORT from environment (see src/core/config.py).
 # Start period allows async DB pool init on first traffic.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import os, urllib.request; p=os.environ.get('APP_PORT','8000'); urllib.request.urlopen(f'http://127.0.0.1:{p}/healthz', timeout=4).read()"
+    CMD python -c "import os, urllib.request; p=os.environ.get('APP_PORT','8000'); urllib.request.urlopen(f'http://127.0.0.1:{p}/health', timeout=4).read()"
 
 CMD ["python", "-m", "src.main"]

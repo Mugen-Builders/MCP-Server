@@ -6,10 +6,36 @@ from uuid import UUID
 from src.server.server import mcp, resource_service
 from src.core.config import get_settings
 from src.schemas.tools import LOCAL_CLI_TRACK, STABLE_CARTESI_CLI, ALPHA_CARTESI_VERSION_PREFIX, STABLE_CREATE_TEMPLATES, ALPHA_CREATE_TEMPLATES, STABLE_OPTIONAL_RUN_SERVICES, ALPHA_OPTIONAL_RUN_SERVICES
-from src.services.local_interaction_helpers import _command, _version_guidance, _alpha_warning, _alpha_v2_warning, _local_execution_steps, _local_execution_steps_for_binary, _cartesi_app_logic_next_steps, get_default_local_privatekeys, normalize_input_payload_to_hex
+from src.services.local_interaction_helpers import (
+    _command,
+    _version_guidance,
+    _alpha_warning,
+    _alpha_v2_warning,
+    _local_execution_steps,
+    _local_execution_steps_for_binary,
+    _cartesi_app_logic_next_steps,
+    get_default_local_privatekeys,
+    normalize_input_payload_to_hex,
+    CARTESI_DOCKERFILE_FINGERPRINTS,
+    PORTAL_PAYLOAD_BYTE_OFFSETS,
+    CARTESI_OUTPUT_ENDPOINTS,
+    CARTESI_JSONRPC_METHODS,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _parse_uuid(value: str, field_name: str = "resource_id") -> UUID:
+    """Validate and parse a UUID string, returning a helpful error message on failure."""
+    try:
+        return UUID(value)
+    except (ValueError, AttributeError):
+        raise ValueError(
+            f"Invalid {field_name}: {value!r}. Must be a UUID in the format "
+            "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. Use search_knowledge_resources "
+            "or summarize_knowledge_base to discover valid resource IDs."
+        )
 
 
 def _resolve_depositor_signing_key(
@@ -42,9 +68,325 @@ def _depositor_balance_holder_ref(depositor_address: str | None) -> str:
 # -----------------
 
 
+# --- ORIENTATION ---
+
+
+@mcp.tool(
+    name="summarize_knowledge_base",
+    description=(
+        "CALL THIS FIRST before any other knowledge retrieval. "
+        "Returns coverage counts by type (repositories, documentation, articles, skills) "
+        "and a step-by-step skills-first usage guide. "
+        "If skills_count > 0, call list_skills next — skill bodies are inline, no URL fetch needed."
+    ),
+)
+async def get_knowledge_base_summary() -> dict:
+    """Returns a high-level overview of the knowledge base with skills-first orientation."""
+    async with resource_service() as svc:
+        summary = await svc.get_knowledge_base_summary()
+        counts = summary.get("summary", {})
+        skills_count = counts.get("skills", 0)
+        articles_count = counts.get("articles", 0)
+        return {
+            "status": "success",
+            "summary": "Loaded knowledge base summary.",
+            "data": {
+                **summary,
+                "note": "Call get_knowledge_taxonomy for the full list of available tags and sources.",
+                "how_to_use": {
+                    "step_1": "Call summarize_knowledge_base to understand what exists (you are here).",
+                    "step_2": f"If skills > 0 ({skills_count} available): call list_skills and get_skill — body is inline, no URL fetch required.",
+                    "step_3": f"If articles > 0 ({articles_count} available): call list_articles and get_article_content — body is inline.",
+                    "step_4": "Call get_knowledge_taxonomy to discover valid tag and source filter values.",
+                    "step_5": "Call search_knowledge_resources or search_documentation_routes with query/tag/source filters.",
+                    "step_6": "Fetch canonical_url or route url with fetch_resource_content when you need doc/repo page contents.",
+                },
+            },
+            "warnings": [
+                "Documentation and repository resources expose metadata and external links only — fetch URLs separately for page body.",
+                "Skills and articles have inline body content — no external URL fetch needed.",
+            ],
+            "next_steps": [
+                f"list_skills — check for a skill covering your task ({skills_count} skills available).",
+                "get_knowledge_taxonomy — discover valid tag and source names for filtering.",
+                "search_knowledge_resources — find resources by query, tag, source, or kind.",
+            ],
+        }
+
+
+@mcp.tool(
+    name="get_knowledge_taxonomy",
+    description="Return the canonical taxonomy of known tag titles and source titles in the knowledge base.",
+)
+async def get_taxonomy() -> dict:
+    """Returns available source names and tag names known to the knowledge base."""
+    async with resource_service() as svc:
+        tags = await svc.get_tag_catalog()
+        sources = await svc.get_source_catalog()
+        return {
+            "status": "success",
+            "summary": "Loaded source and tag taxonomy.",
+            "data": {"tags": tags, "sources": sources},
+            "warnings": [],
+            "next_steps": [
+                "Use the returned tag titles as the tag= parameter in search_knowledge_resources or list_resources_for_tag.",
+                "Use the returned source titles as the source= parameter in search_knowledge_resources or list_resources_for_source.",
+                "Combine tag and source filters with a query string for highest-precision searches.",
+            ],
+        }
+
+
+# --- CLI VERSION DETECTION ---
+
+
+@mcp.tool(
+    name="identify_cartesi_project_version",
+    description=(
+        "Return the full reference guide for identifying whether a Cartesi project targets CLI v1.5 or v2.0-alpha "
+        "from Dockerfile signals, CLI output, and capability differences. "
+        "CRITICAL: `cartesi deploy` does NOT exist in v2.0-alpha — always call this tool before suggesting any deployment command. "
+        "Also covers the Docker Compose deployment flow for v2.0-alpha."
+    ),
+)
+async def identify_cartesi_project_version(project_path: str = ".") -> dict:
+    """Returns complete v1.5 vs v2.0-alpha fingerprint table, CLI capability differences, and deployment flow reference."""
+    v15 = CARTESI_DOCKERFILE_FINGERPRINTS["v1_5"]
+    v2 = CARTESI_DOCKERFILE_FINGERPRINTS["v2_0_alpha"]
+    return {
+        "status": "success",
+        "summary": "Loaded Cartesi project version identification guide (v1.5 vs v2.0-alpha).",
+        "data": {
+            "step_1_check_cli_version": {
+                "command": "cartesi --version",
+                "interpretation": {
+                    f"output starts with {ALPHA_CARTESI_VERSION_PREFIX}": "→ v2.0-alpha",
+                    "output is 1.5.x": "→ stable v1.5",
+                },
+            },
+            "step_2_check_dockerfile": {
+                "command": CARTESI_DOCKERFILE_FINGERPRINTS["detect_command"],
+                "working_directory": project_path,
+                "interpretation": {
+                    "MACHINE_EMULATOR_TOOLS_VERSION present": "→ v1.5 project",
+                    "MACHINE_GUEST_TOOLS_VERSION present": "→ v2.0-alpha project",
+                },
+            },
+            "dockerfile_comparison_table": {
+                "signal": {
+                    "Base image (Python example)": {
+                        "v1_5": v15["base_image_example"],
+                        "v2_0_alpha": v2["base_image_example"],
+                    },
+                    "Build stages": {
+                        "v1_5": v15["build_stages"],
+                        "v2_0_alpha": v2["build_stages"],
+                    },
+                    "Entrypoint": {
+                        "v1_5": v15["entrypoint"],
+                        "v2_0_alpha": v2["entrypoint"],
+                    },
+                    "Guest tools install": {
+                        "v1_5": v15["tools_install_method"],
+                        "v2_0_alpha": v2["tools_install_method"],
+                    },
+                    "APT_UPDATE_SNAPSHOT": {
+                        "v1_5": v15["apt_update_snapshot"],
+                        "v2_0_alpha": v2["apt_update_snapshot"],
+                    },
+                },
+            },
+            "cli_capability_differences": {
+                "cartesi_deploy_command": {
+                    "v1_5": "Supported — `cartesi deploy`",
+                    "v2_0_alpha": v2["cartesi_deploy_warning"],
+                },
+                "cli_binary": {
+                    "v1_5": v15["cli_command"],
+                    "v2_0_alpha": v2["cli_command"],
+                },
+                "local_run_flags": {
+                    "v1_5": v15["local_run"],
+                    "v2_0_alpha": v2["local_run"],
+                },
+                "node_stack": {
+                    "v1_5": v15["node_stack"],
+                    "v2_0_alpha": v2["node_stack"],
+                },
+            },
+            "v2_0_alpha_deployment_flow": {
+                "warning": v2["cartesi_deploy_warning"],
+                "steps": [
+                    "1. `cartesi build` — builds the machine snapshot to .cartesi/image/",
+                    "2. Download `compose.local.yaml` from the Mugen-Builders repo",
+                    "3. Create `.env` with chain configuration (CARTESI_BLOCKCHAIN_ID, RPC endpoints, CARTESI_AUTH_MNEMONIC)",
+                    "4. `docker compose -f compose.local.yaml --env-file .env up -d`",
+                    "5. Register app: `docker compose -f compose.local.yaml exec advancer cartesi-rollups-cli deploy application <name> .cartesi/image/`",
+                ],
+                "services": v2["compose_services"],
+                "ports": v2["compose_ports"],
+            },
+            "v2_0_alpha_jsonrpc_api": {
+                "port": v2["json_rpc_api_port"],
+                "inspect_port": v2["inspect_port"],
+                "note": "Use `get_cartesi_jsonrpc_api_reference` for the full list of cartesi_ JSON-RPC methods.",
+            },
+        },
+        "warnings": [
+            v2["cartesi_deploy_warning"],
+        ],
+        "next_steps": [
+            "Run `cartesi --version` on the user's machine.",
+            f"Run: {CARTESI_DOCKERFILE_FINGERPRINTS['detect_command']} — in the project directory to confirm project version.",
+            "If v2.0-alpha: use `prepare_cartesi_build_command` then Docker Compose deployment — never `cartesi deploy`.",
+            "If v1.5: all standard `cartesi` commands apply including `cartesi deploy`.",
+        ],
+    }
+
+
+# --- SKILLS (inline body — check before knowledge search) ---
+
+
+@mcp.tool(
+    name="list_skills",
+    description=(
+        "List all available skills with title, description, tags, and source. "
+        "Skills have their full body stored inline in the database — no external URL fetch required. "
+        "Call this BEFORE searching knowledge resources; if a skill covers your task, use get_skill to read its body directly. "
+        "Optionally filter by tag or source title (use get_knowledge_taxonomy first for valid values)."
+    ),
+)
+async def list_skills(
+    tag: str | None = None,
+    source: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Lists available skills with metadata. Bodies are retrieved via get_skill."""
+    limit = min(max(limit, 1), settings.max_page_size)
+    async with resource_service() as svc:
+        skills = await svc.list_skills(tag=tag, source=source, limit=limit)
+        return {
+            "status": "success",
+            "summary": f"Found {len(skills)} skill(s).",
+            "data": {
+                "skills": skills,
+                "result_count": len(skills),
+                "has_more": len(skills) == limit,
+            },
+            "warnings": [
+                "This response contains skill metadata only. Call get_skill(resource_id) for the full body.",
+            ],
+            "next_steps": [
+                "Call get_skill(resource_id) with any matching resource_id — body is returned inline, no URL fetch needed.",
+                "If no skill covers the task, proceed to search_knowledge_resources.",
+            ],
+        }
+
+
+@mcp.tool(
+    name="get_skill",
+    description=(
+        "Retrieve the full body of a skill by resource ID. "
+        "Skill bodies are stored inline in the database and returned directly — no external URL fetch required. "
+        "Use list_skills first to discover available skills and their resource IDs."
+    ),
+)
+async def get_skill(resource_id: str) -> dict:
+    """Returns the full inline body of a skill resource."""
+    async with resource_service() as svc:
+        try:
+            payload = await svc.get_skill(_parse_uuid(resource_id))
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+        return {
+            "status": "success",
+            "summary": f"Loaded skill '{payload['title']}'. Body is inline — no URL fetch required.",
+            "data": payload,
+            "warnings": [],
+            "next_steps": [
+                "Apply the skill instructions directly.",
+                "If the skill references other resources, use get_resource_detail for context.",
+            ],
+        }
+
+
+# --- ARTICLES (inline body — no URL fetch required) ---
+
+
+@mcp.tool(
+    name="list_articles",
+    description=(
+        "List available articles with title, description, tags, and source. "
+        "Article bodies are stored inline in the database — call get_article_content for the full body without any external URL fetch. "
+        "Optionally filter by tag or source (use get_knowledge_taxonomy for valid values). "
+        "Valid kind value for search_knowledge_resources: 'article'."
+    ),
+)
+async def list_articles(
+    tag: str | None = None,
+    source: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Lists articles with metadata. Full bodies are retrieved via get_article_content."""
+    limit = min(max(limit, 1), settings.max_page_size)
+    async with resource_service() as svc:
+        result = await svc.list_articles(tag=tag, source=source, limit=limit)
+        data = result.model_dump(mode="json")
+        data["result_count"] = len(result.cards)
+        data["has_more"] = len(result.cards) == limit
+        return {
+            "status": "success",
+            "summary": f"Found {len(result.cards)} article(s).",
+            "data": data,
+            "warnings": [
+                "This response contains article metadata only. Call get_article_content(resource_id) for the full body.",
+            ],
+            "next_steps": [
+                "Call get_article_content(resource_id) with any matching ID — body is returned inline, no URL fetch needed.",
+                "Use the returned canonical_url if you need to link users to the published article.",
+            ],
+        }
+
+
+@mcp.tool(
+    name="get_article_content",
+    description=(
+        "Retrieve the full body of an article by resource ID. "
+        "Article bodies are stored inline in the database — returned directly with no external URL fetch. "
+        "Also includes year_published and last_updated_at when available. "
+        "Use list_articles first to discover available articles and their resource IDs."
+    ),
+)
+async def get_article_content(resource_id: str) -> dict:
+    """Returns the full inline body of an article resource."""
+    async with resource_service() as svc:
+        try:
+            payload = await svc.get_article(_parse_uuid(resource_id))
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+        title = payload.get("resource", {}).get("title", resource_id)
+        return {
+            "status": "success",
+            "summary": f"Loaded article '{title}'. Body is inline — no URL fetch required.",
+            "data": payload,
+            "warnings": [],
+            "next_steps": [
+                "Use the canonical_url field if you need to link users to the published article page.",
+                "Cross-reference with search_knowledge_resources for related documentation.",
+            ],
+        }
+
+
+# --- SEARCH ---
+
+
 @mcp.tool(
     name="search_knowledge_resources",
-    description="Search curated Cartesi knowledge resources by text query, source, tag, or kind and return matching resource cards.",
+    description=(
+        "Search curated Cartesi knowledge resources by text query, source, tag, or kind. "
+        "Valid kind values: 'repository', 'documentation', 'article', 'skill'. "
+        "Use get_knowledge_taxonomy first to get valid tag and source values. "
+        "Returns matching resource cards with IDs, URLs, and MCP URIs for follow-up."
+    ),
 )
 async def search_resources(
     query: str | None = None,
@@ -57,10 +399,15 @@ async def search_resources(
     limit = min(max(limit, 1), settings.max_page_size)
     async with resource_service() as svc:
         result = await svc.search_resources(query=query, tag=tag, source=source, kind=kind, limit=limit)
+        data = result.model_dump(mode="json")
+        data["result_count"] = len(result.cards)
+        data["has_more"] = len(result.cards) == limit
+        if data["has_more"]:
+            data["hint"] = "Results may be truncated. Increase limit or add filters to narrow results."
         return {
             "status": "success",
             "summary": f"Found {len(result.cards)} matching resources.",
-            "data": result.model_dump(mode="json"),
+            "data": data,
             "warnings": [
                 "This server currently returns metadata and links only, not fetched page contents.",
             ],
@@ -68,51 +415,6 @@ async def search_resources(
                 "Use the returned resource URI to fetch a full resource document.",
                 "Use search_doc_routes for route-level documentation lookup.",
                 "If you need the source page contents, fetch the returned canonical_url separately.",
-            ],
-        }
-
-
-@mcp.tool(
-    name="get_resource_detail",
-    description="Get normalized metadata for a single resource by resource ID, with optional documentation routes.",
-)
-async def get_resource_details(resource_id: str, include_routes: bool = True) -> dict:
-    """Fetches a fully normalized resource document by resource ID, including external links and related routes but not fetched page body text."""
-    async with resource_service() as svc:
-        detail = await svc.get_resource_details(UUID(resource_id), include_routes=include_routes)
-        return {
-            "status": "success",
-            "summary": f"Loaded resource '{detail.title}'.",
-            "data": detail.model_dump(mode="json"),
-            "warnings": [
-                "This payload does not include the full contents of the external page.",
-            ],
-            "next_steps": [
-                "Use linked URIs to fetch related repository or documentation views.",
-                "Fetch data.canonical_url separately when you need the actual page contents.",
-            ],
-        }
-
-
-@mcp.tool(
-    name="list_resource_doc_routes",
-    description="List documentation routes for one documentation resource, optionally filtered by section.",
-)
-async def list_doc_routes(resource_id: str, section: str | None = None, limit: int = 25) -> dict:
-    """Lists documentation routes for a documentation resource, optionally filtered by section; results include route links but not fetched route body text."""
-    limit = min(max(limit, 1), settings.max_page_size)
-    async with resource_service() as svc:
-        payload = await svc.list_doc_routes(UUID(resource_id), section=section, limit=limit)
-        return {
-            "status": "success",
-            "summary": f"Found {len(payload.routes)} documentation routes for '{payload.resource_title}'.",
-            "data": payload.model_dump(mode="json"),
-            "warnings": [
-                "Route entries expose metadata and URLs, not the fetched contents of those URLs.",
-            ],
-            "next_steps": [
-                "Use the route URI to load one route with its parent resource context.",
-                "Fetch the selected route URL separately when you need the actual doc page contents.",
             ],
         }
 
@@ -132,10 +434,14 @@ async def search_doc_routes(
     limit = min(max(limit, 1), settings.max_page_size)
     async with resource_service() as svc:
         rows = await svc.search_doc_routes(query=query, section=section, source=source, tag=tag, limit=limit)
+        has_more = len(rows) == limit
+        data: dict = {"results": rows, "result_count": len(rows), "has_more": has_more}
+        if has_more:
+            data["hint"] = "Results may be truncated. Increase limit or add filters to narrow results."
         return {
             "status": "success",
             "summary": f"Found {len(rows)} matching documentation routes.",
-            "data": {"results": rows},
+            "data": data,
             "warnings": [
                 "Search results do not include full documentation page contents.",
             ],
@@ -143,59 +449,6 @@ async def search_doc_routes(
                 "Use the route URI to inspect a single route in more detail.",
                 "Fetch the selected route URL separately when you need the actual doc page contents.",
             ],
-        }
-
-
-@mcp.tool(
-    name="list_resources_for_tag",
-    description="List resources associated with a specific tag title.",
-)
-async def list_resources_by_tag(tag_title: str, limit: int = 10) -> dict:
-    """Lists resources associated with a specific tag."""
-    limit = min(max(limit, 1), settings.max_page_size)
-    async with resource_service() as svc:
-        result = await svc.list_resources_by_tag(tag_title=tag_title, limit=limit)
-        return {
-            "status": "success",
-            "summary": f"Found {len(result.cards)} resources tagged '{tag_title}'.",
-            "data": result.model_dump(mode="json"),
-            "warnings": [],
-            "next_steps": [],
-        }
-
-
-@mcp.tool(
-    name="list_resources_for_source",
-    description="List resources associated with a specific source title.",
-)
-async def list_resources_by_source(source_title: str, limit: int = 10) -> dict:
-    """Lists resources associated with a specific source, such as core contributors or community."""
-    limit = min(max(limit, 1), settings.max_page_size)
-    async with resource_service() as svc:
-        result = await svc.list_resources_by_source(source_title=source_title, limit=limit)
-        return {
-            "status": "success",
-            "summary": f"Found {len(result.cards)} resources for source '{source_title}'.",
-            "data": result.model_dump(mode="json"),
-            "warnings": [],
-            "next_steps": [],
-        }
-
-
-@mcp.tool(
-    name="get_repository_sync_status",
-    description="Get synchronization freshness and metadata for a repository-backed resource.",
-)
-async def get_repository_status(resource_id: str) -> dict:
-    """Returns sync freshness and metadata for one tracked repository resource."""
-    async with resource_service() as svc:
-        payload = await svc.get_repository_status(UUID(resource_id))
-        return {
-            "status": "success",
-            "summary": f"Loaded repository status for '{payload.title}'.",
-            "data": payload.model_dump(mode="json"),
-            "warnings": [],
-            "next_steps": [],
         }
 
 
@@ -223,63 +476,300 @@ async def get_debugging_context(query: str, prefer_official_only: bool = False, 
         }
 
 
-@mcp.tool(
-    name="get_knowledge_taxonomy",
-    description="Return the canonical taxonomy of known tag titles and source titles in the knowledge base.",
-)
-async def get_taxonomy() -> dict:
-    """Returns available source names and tag names known to the knowledge base."""
-    async with resource_service() as svc:
-        tags = await svc.get_tag_catalog()
-        sources = await svc.get_source_catalog()
-        return {
-            "status": "success",
-            "summary": "Loaded source and tag taxonomy.",
-            "data": {"tags": tags, "sources": sources},
-            "warnings": [],
-            "next_steps": [],
-        }
-    
+# --- DETAIL FETCH ---
+
 
 @mcp.tool(
-    name="summarize_knowledge_base",
-    description="Return high-level knowledge-base coverage, counts by type, and orientation guidance for follow-up retrieval.",
+    name="get_resource_detail",
+    description="Get normalized metadata for a single resource by resource ID, with optional documentation routes.",
 )
-async def get_knowledge_base_summary() -> dict:
-    """
-    Returns a high-level overview of the knowledge base: counts by type,
-    all tags, and all sources. Agents should call this first to orient
-    themselves before searching or reading specific resources.
-    """
+async def get_resource_details(resource_id: str, include_routes: bool = True) -> dict:
+    """Fetches a fully normalized resource document by resource ID, including external links and related routes but not fetched page body text."""
     async with resource_service() as svc:
-        summary = await svc.get_knowledge_base_summary()
+        detail = await svc.get_resource_details(_parse_uuid(resource_id), include_routes=include_routes)
         return {
             "status": "success",
-            "summary": "Loaded knowledge base summary.",
-            "data": {
-                **summary,
-                "how_to_use": {
-                    "step_1": "Call get_knowledge_base_summary to understand what exists (you are here).",
-                    "step_2": "Call search_resources with query/tag/source filters to find relevant items.",
-                    "step_3": "Read cartesi://resources/{resource_id} for normalized metadata and related links for a specific resource.",
-                    "step_4": "For documentation, use list_doc_routes or search_doc_routes to navigate sub-routes and identify the best route URL.",
-                    "step_5": "Fetch canonical_url or route url separately when you need the actual page contents, since this server currently returns links rather than stored page bodies.",
-                },
-            },
+            "summary": f"Loaded resource '{detail.title}'.",
+            "data": detail.model_dump(mode="json"),
             "warnings": [
-                "This knowledge base currently provides metadata, route indexes, and external links rather than full fetched page contents.",
+                "This payload does not include the full contents of the external page.",
             ],
             "next_steps": [
-                "Use search_resources to locate resources by query, tag, source, or kind.",
-                "Fetch specific resource details with get_resource_details(resource_id).",
-                "Fetch the returned external URLs separately when deeper content inspection is required.",
+                "Use linked URIs to fetch related repository or documentation views.",
+                "Fetch data.canonical_url separately when you need the actual page contents.",
             ],
         }
+
+
+@mcp.tool(
+    name="list_resource_doc_routes",
+    description="List documentation routes for one documentation resource, optionally filtered by section.",
+)
+async def list_doc_routes(resource_id: str, section: str | None = None, limit: int = 25) -> dict:
+    """Lists documentation routes for a documentation resource, optionally filtered by section; results include route links but not fetched route body text."""
+    limit = min(max(limit, 1), settings.max_page_size)
+    async with resource_service() as svc:
+        payload = await svc.list_doc_routes(_parse_uuid(resource_id), section=section, limit=limit)
+        return {
+            "status": "success",
+            "summary": f"Found {len(payload.routes)} documentation routes for '{payload.resource_title}'.",
+            "data": payload.model_dump(mode="json"),
+            "warnings": [
+                "Route entries expose metadata and URLs, not the fetched contents of those URLs.",
+            ],
+            "next_steps": [
+                "Use the route URI to load one route with its parent resource context.",
+                "Fetch the selected route URL separately when you need the actual doc page contents.",
+            ],
+        }
+
+
+@mcp.tool(
+    name="list_resources_for_tag",
+    description="List resources associated with a specific tag title.",
+)
+async def list_resources_by_tag(tag_title: str, limit: int = 10) -> dict:
+    """Lists resources associated with a specific tag."""
+    limit = min(max(limit, 1), settings.max_page_size)
+    async with resource_service() as svc:
+        result = await svc.list_resources_by_tag(tag_title=tag_title, limit=limit)
+        return {
+            "status": "success",
+            "summary": f"Found {len(result.cards)} resources tagged '{tag_title}'.",
+            "data": result.model_dump(mode="json"),
+            "warnings": [
+                "Tag title must match exactly (case-insensitive). Use get_knowledge_taxonomy first to discover valid tag titles.",
+            ],
+            "next_steps": [
+                "If results are empty, verify the tag title via get_knowledge_taxonomy.",
+                "Use get_resource_detail with a returned resource ID to see full metadata and routes.",
+                f"Increase the limit parameter (max {settings.max_page_size}) to see more results.",
+            ],
+        }
+
+
+@mcp.tool(
+    name="list_resources_for_source",
+    description="List resources associated with a specific source title.",
+)
+async def list_resources_by_source(source_title: str, limit: int = 10) -> dict:
+    """Lists resources associated with a specific source, such as core contributors or community."""
+    limit = min(max(limit, 1), settings.max_page_size)
+    async with resource_service() as svc:
+        result = await svc.list_resources_by_source(source_title=source_title, limit=limit)
+        return {
+            "status": "success",
+            "summary": f"Found {len(result.cards)} resources for source '{source_title}'.",
+            "data": result.model_dump(mode="json"),
+            "warnings": [
+                "Source title must match exactly (case-insensitive). Use get_knowledge_taxonomy first to discover valid source titles.",
+            ],
+            "next_steps": [
+                "If results are empty, verify the source title via get_knowledge_taxonomy.",
+                "Typical sources are 'core contributors' and 'community'.",
+                "Use get_resource_detail with a returned resource ID to see full metadata.",
+            ],
+        }
+
+
+@mcp.tool(
+    name="get_repository_sync_status",
+    description="Get synchronization freshness and metadata for a repository-backed resource.",
+)
+async def get_repository_status(resource_id: str) -> dict:
+    """Returns sync freshness and metadata for one tracked repository resource."""
+    async with resource_service() as svc:
+        payload = await svc.get_repository_status(_parse_uuid(resource_id))
+        return {
+            "status": "success",
+            "summary": f"Loaded repository status for '{payload.title}'.",
+            "data": payload.model_dump(mode="json"),
+            "warnings": [
+                "Only applies to resources where kind == 'repository'. Use get_resource_detail first to confirm.",
+            ],
+            "next_steps": [
+                "If stale is true, the repository may have outdated metadata. Fetch the canonical_url for the latest information.",
+                "A null last_synced_at means the repository has never been synced — treat as potentially stale.",
+            ],
+        }
+
+
+# --- APP LIFECYCLE ---
+
+
+@mcp.tool(
+    name="get_cartesi_jsonrpc_api_reference",
+    description=(
+        "Return the complete JSON-RPC 2.0 API reference for a Cartesi Rollups v2.0-alpha node (port 10011). "
+        "Covers all `cartesi_` prefixed methods for querying applications, epochs, inputs, outputs, reports, and node info. "
+        "Includes TypeScript call patterns and pagination. Only relevant for v2.0-alpha deployments."
+    ),
+)
+async def get_cartesi_jsonrpc_api_reference(
+    node_url: str = "http://localhost:10011",
+) -> dict:
+    """Returns the full cartesi_ JSON-RPC method reference for v2.0-alpha nodes."""
+    example_curl = (
+        f'curl -s -X POST "{node_url}" \\\n'
+        '  -H "Content-Type: application/json" \\\n'
+        '  -d \'{"jsonrpc":"2.0","method":"cartesi_getNodeVersion","params":{},"id":1}\''
+    )
+    example_poll_input = (
+        "// Poll until input is processed (TypeScript)\n"
+        "async function waitForInput(app: string, inputIndex: number) {\n"
+        "  while (true) {\n"
+        "    const count = await rpc('cartesi_getProcessedInputCount', { applicationAddress: app });\n"
+        "    if (count > inputIndex) break;\n"
+        "    await new Promise(r => setTimeout(r, 2000));\n"
+        "  }\n"
+        "}"
+    )
+    return {
+        "status": "success",
+        "summary": f"Loaded Cartesi JSON-RPC API reference for node at {node_url}.",
+        "data": {
+            "protocol": "JSON-RPC 2.0",
+            "node_url": node_url,
+            "port": 10011,
+            "version_requirement": "Cartesi Rollups v2.0-alpha only",
+            "methods": CARTESI_JSONRPC_METHODS,
+            "pagination_pattern": {
+                "note": "Most list methods support cursor-based pagination.",
+                "usage": "Pass `cursor` from previous response's `pageInfo.endCursor`; set `pageSize` to control page size.",
+            },
+            "example_curl_call": example_curl,
+            "example_poll_until_processed": example_poll_input,
+            "typescript_base_call": (
+                "async function rpc(method: string, params: object) {\n"
+                f'  const res = await fetch("{node_url}", {{\n'
+                '    method: "POST",\n'
+                '    headers: { "Content-Type": "application/json" },\n'
+                '    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),\n'
+                "  });\n"
+                "  const { result } = await res.json();\n"
+                "  return result;\n"
+                "}"
+            ),
+        },
+        "warnings": [
+            "This API is only available on Cartesi Rollups v2.0-alpha nodes (port 10011).",
+            "For v1.5 local dev, use `cartesi-rollups-cli read` commands instead.",
+        ],
+        "next_steps": [
+            "Verify the node is running: `curl -s http://localhost:10011 -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"cartesi_getNodeVersion\",\"params\":{},\"id\":1}'`",
+            "Use `cartesi_listApplications` to confirm your app is registered and active.",
+            "Use `cartesi_getProcessedInputCount` to poll until your input is processed.",
+        ],
+    }
+
+
+@mcp.tool(
+    name="get_cartesi_app_logic_guidance",
+    description=(
+        "Comprehensive implementation guide for Cartesi application backend logic: "
+        "output types (notices, vouchers, reports, exceptions), portal deposit detection via metadata.msg_sender, "
+        "portal payload byte offsets for decode, known local devnet contract addresses, finish-loop pattern, "
+        "and relevant doc query topics. Use this when writing or reviewing advance/inspect handler code."
+    ),
+)
+async def get_cartesi_app_logic_guidance(project_path: str = ".") -> dict:
+    return {
+        "status": "success",
+        "summary": "Prepared Cartesi application logic implementation guidance.",
+        "data": {
+            "execution_location": "Run any CLI commands on the user's machine, not on this MCP server.",
+            "project_path": project_path,
+            "required_local_command": "cartesi address-book",
+            "why_address_book_matters": [
+                "Use it to retrieve the local contract addresses and names needed for deposits and token interactions.",
+                "Typical references include InputBox, ERC20Portal, ERC721Portal, ERC1155SinglePortal, and test tokens.",
+                "Contract addresses can change between CLI versions and network environments — always use `cartesi address-book` as the authoritative source.",
+            ],
+            "how_to_get_addresses": {
+                "command": "cartesi address-book",
+                "working_directory": project_path,
+                "contracts_to_record": ["InputBox", "ERC20Portal", "ERC721Portal", "ERC1155SinglePortal", "TestToken", "TestNFT", "TestMultiToken"],
+                "note": "Run this command in the project directory on the user's machine before implementing any deposit or contract interaction logic.",
+            },
+            "output_types": {
+                "description": "The Cartesi Machine emits outputs via HTTP POST to the rollup server running inside the machine.",
+                "base_url": "http://127.0.0.1:5004",
+                "endpoints": CARTESI_OUTPUT_ENDPOINTS,
+                "rule": "Always emit at least one report even on error so the inspect handler or debugger can surface the failure reason.",
+            },
+            "portal_deposit_detection": {
+                "pattern": "Check `metadata.msg_sender` in the advance input to determine the deposit type.",
+                "rule": "If msg_sender matches a portal address, decode the payload using the portal's byte layout below. Otherwise treat as a direct user input.",
+                "how_to_get_portal_addresses": "Run `cartesi address-book` in the project directory — look up ERC20Portal, ERC721Portal, ERC1155SinglePortal addresses from the output.",
+                "js_dispatch_pattern": (
+                    "// Get portal addresses from `cartesi address-book` output\n"
+                    "const ERC20_PORTAL = '<ERC20Portal address from cartesi address-book>'.toLowerCase();\n"
+                    "if (data.metadata.msg_sender.toLowerCase() === ERC20_PORTAL) {\n"
+                    "  // decode ERC-20 deposit payload using byte offsets below\n"
+                    "}"
+                ),
+            },
+            "portal_payload_byte_offsets": PORTAL_PAYLOAD_BYTE_OFFSETS,
+            "finish_loop_pattern": {
+                "description": "The backend polls /finish to signal readiness and receive the next input.",
+                "steps": [
+                    "POST to /finish with {status: 'accept'} or {status: 'reject'} to complete the current request.",
+                    "The response body contains {request_type: 'advance_state'|'inspect_state', data: {...}}.",
+                    "Dispatch to handle_advance or handle_inspect based on request_type.",
+                    "Loop indefinitely — the machine runs forever waiting for inputs.",
+                ],
+            },
+            "implementation_topics": [
+                "advance handler",
+                "inspect handler",
+                "deposits",
+                "ERC20 interactions",
+                "ERC721 interactions",
+                "ERC1155 interactions",
+                "ERC20Portal usage",
+                "ERC721Portal usage",
+                "Sending inputs and assets",
+                "InputBox usage",
+                "vouchers",
+                "notices",
+                "reports",
+                "portal addresses",
+                "payload encoding hex",
+            ],
+            "recommended_doc_queries": [
+                "InputBox",
+                "ERC20 deposits",
+                "ERC721 deposits",
+                "ERC1155 deposits",
+                "vouchers",
+                "notices",
+                "reports",
+                "portals",
+                "advance handler",
+                "inspect handler",
+                "finish loop",
+                "Cartesi tutorials",
+                "Cartesi documentation",
+                "integration guide",
+                "tutorial",
+            ],
+        },
+        "warnings": [
+            "The MCP server can explain the workflow, but `cartesi address-book` must be run on the user's machine.",
+            "Portal addresses in `known_contract_addresses` are standard for most networks including local Anvil devnet — always verify with `cartesi address-book` before using in production.",
+            "The application only receives hex-encoded payloads; always decode them inside the handler.",
+        ],
+        "next_steps": _cartesi_app_logic_next_steps(project_path),
+    }
 
 
 @mcp.tool(
     name="prepare_cartesi_create_command",
-    description="Generate step-by-step host-machine instructions for creating a Cartesi app with the user's own Cartesi CLI.",
+    description=(
+        "Generate step-by-step host-machine instructions for creating a Cartesi app with the user's own Cartesi CLI. "
+        "cli_track options: 'stable-1.5.x' (Cartesi CLI v1.5.x), 'alpha-2.x' (v2.0.0+), or 'unknown'. "
+        "Run `cartesi --version` on the user's machine first to determine the correct track."
+    ),
 )
 async def prepare_cartesi_create_command(
     project_name: str,
@@ -314,6 +804,9 @@ async def prepare_cartesi_create_command(
     warnings.extend(_alpha_warning("create"))
     warnings.extend(_alpha_v2_warning("create"))
 
+    v2_fingerprints = CARTESI_DOCKERFILE_FINGERPRINTS["v2_0_alpha"]
+    v15_fingerprints = CARTESI_DOCKERFILE_FINGERPRINTS["v1_5"]
+
     return {
         "status": "success",
         "summary": f"Prepared host-side create instructions for project `{project_name}`.",
@@ -330,13 +823,21 @@ async def prepare_cartesi_create_command(
                 "working_directory": destination_root,
                 "command": stable_command,
                 "expected_templates": list(STABLE_CREATE_TEMPLATES),
+                "dockerfile_marker": v15_fingerprints["dockerfile_env_var"],
+                "deployment_after_build": "`cartesi deploy` command is supported",
             },
             "alpha_v2_0": {
-                "binary": "cartesi",
+                "binary": v2_fingerprints["cli_command"],
                 "working_directory": destination_root,
                 "command": alpha_command,
                 "default_branch": "prerelease/sdk-12",
                 "expected_templates": list(ALPHA_CREATE_TEMPLATES),
+                "dockerfile_marker": v2_fingerprints["dockerfile_env_var"],
+                "deployment_after_build": v2_fingerprints["cartesi_deploy_warning"],
+            },
+            "identify_project_version_hint": {
+                "command": CARTESI_DOCKERFILE_FINGERPRINTS["detect_command"],
+                "note": "Run this in the created project directory after scaffold to confirm the project version.",
             },
             "local_preflight": [
                 "cartesi --version",
@@ -347,71 +848,19 @@ async def prepare_cartesi_create_command(
         "next_steps": [
             *_local_execution_steps("create", stable_command or "cartesi create --help", destination_root),
             *_local_execution_steps_for_binary("create", alpha_command or "cartesi create --help", destination_root, "cartesi"),
+            "After scaffolding: run `identify_cartesi_project_version` to confirm the Dockerfile version marker and understand deployment options.",
             *_cartesi_app_logic_next_steps(destination_root),
         ],
     }
 
 
 @mcp.tool(
-    name="get_cartesi_app_logic_guidance",
-    description="Explain what an agent should check when implementing Cartesi application logic, including address-book usage and relevant documentation/tutorial topics.",
-)
-async def get_cartesi_app_logic_guidance(project_path: str = ".") -> dict:
-    return {
-        "status": "success",
-        "summary": "Prepared Cartesi application logic implementation guidance.",
-        "data": {
-            "execution_location": "Run any CLI commands on the user's machine, not on this MCP server.",
-            "project_path": project_path,
-            "required_local_command": "cartesi address-book",
-            "why_address_book_matters": [
-                "Use it to retrieve the local contract addresses and names needed for deposits and token interactions.",
-                "Typical references include InputBox, ERC20Portal, ERC721Portal, and other portal-related contracts exposed by the local environment.",
-            ],
-            "implementation_topics": [
-                "deposits",
-                "ERC20 interactions",
-                "ERC721 interactions",
-                "ERC20Portal usage",
-                "ERC721Portal usage",
-                "Sending inputs and assets"
-                "InputBox usage",
-                "vouchers",
-                "notices",
-                "reports",
-                "portal addresses",
-            ],
-            "recommended_doc_queries": [
-                "InputBox",
-                "ERC20 deposits",
-                "ERC721 deposits",
-                "vouchers",
-                "notices",
-                "reports",
-                "portals",
-                "Cartesi tutorials",
-                "tutorials",
-                "Cartesi documentation",
-                "documentation",
-                "docs",
-                "Cartesi guide",
-                "app demo"
-                "demo"
-                "integration"
-                "integration guide"
-                "tutorial"
-            ],
-        },
-        "warnings": [
-            "The MCP server can explain the workflow, but `cartesi address-book` must be run on the user's machine.",
-        ],
-        "next_steps": _cartesi_app_logic_next_steps(project_path),
-    }
-
-
-@mcp.tool(
     name="prepare_cartesi_build_command",
-    description="Generate step-by-step host-machine instructions for building a Cartesi app with the user's own Cartesi CLI.",
+    description=(
+        "Generate step-by-step host-machine instructions for building a Cartesi app with the user's own Cartesi CLI. "
+        "cli_track options: 'stable-1.5.x', 'alpha-2.x', or 'unknown'. "
+        "Run `cartesi --version` on the user's machine first to determine the correct track."
+    ),
 )
 async def prepare_cartesi_build_command(
     project_path: str,
@@ -481,7 +930,11 @@ async def prepare_cartesi_build_command(
 
 @mcp.tool(
     name="prepare_cartesi_run_command",
-    description="Generate step-by-step host-machine instructions for running a Cartesi app with the user's own Cartesi CLI.",
+    description=(
+        "Generate step-by-step host-machine instructions for running a Cartesi app with the user's own Cartesi CLI. "
+        "cli_track options: 'stable-1.5.x', 'alpha-2.x', or 'unknown'. "
+        "Run `cartesi --version` on the user's machine first to determine the correct track."
+    ),
 )
 async def prepare_cartesi_run_command(
     project_path: str,
@@ -615,6 +1068,8 @@ async def prepare_cartesi_run_command(
     }
 
 
+# --- INTERACTION ---
+
 
 @mcp.tool(
     name="send_input_to_application",
@@ -651,6 +1106,10 @@ async def send_input_to_application(
         warnings.append("The application address is required before sending input. Retrieve it from the running application context before executing the cast command.")
     if rpc_url is None:
         warnings.append("The RPC URL is required before sending input. For stable v1.5.x the common default is `http://127.0.0.1:8545`; for versions that start with `2.0.0`, the CLI run output may expose an application-specific RPC URL.")
+    warnings.append(
+        "`cartesi send` may not be available in all v2.0-alpha CLI releases. "
+        "This tool always generates a `cast send` command as the reliable fallback — use it regardless of CLI version."
+    )
 
     return {
         "status": "success",
@@ -676,7 +1135,7 @@ async def send_input_to_application(
             },
             "address_book_guidance": {
                 "command": "cartesi address-book",
-                "purpose": "Use this to find the InputBox and related local contract addresses before sending inputs.",
+                "purpose": "Run this in the project directory to get the InputBox address for the active devnet — addresses can change between CLI versions and environments.",
                 "target_contract": "InputBox",
             },
             "input_payload": {
@@ -702,6 +1161,9 @@ async def send_input_to_application(
             "If you need multiple distinct users to send transactions, reuse the same command with different private keys from the returned list.",
         ],
     }
+
+
+# --- DEPOSITS ---
 
 
 @mcp.tool(
@@ -830,6 +1292,7 @@ async def prepare_erc20_deposit_instructions(
         "status": "success",
         "summary": "Prepared host-side workflow for ERC20 deposits through ERC20Portal.",
         "data": {
+            "context": f"ERC20 deposit: {token_amount} tokens to {app_ref}",
             "execution_location": "Run these commands on the user's machine, not on this MCP server.",
             "version_guidance": _version_guidance(cli_track),
             "agent_workflow": [
@@ -868,6 +1331,14 @@ async def prepare_erc20_deposit_instructions(
                 "command": "cartesi address-book",
                 "purpose": "Resolve ERC20Portal and TestToken (or other listed token) addresses for the active Cartesi dev stack.",
                 "target_contracts": ["ERC20Portal", "TestToken"],
+                "note": "Contract addresses change between CLI versions and network environments — always use `cartesi address-book` as the authoritative source.",
+            },
+            "backend_decode_reference": {
+                "description": "In the advance handler, detect ERC20 deposits by checking msg_sender and decode the payload using these byte offsets.",
+                "detect_by": PORTAL_PAYLOAD_BYTE_OFFSETS["ERC20"]["detect_by"],
+                "byte_offsets": {k: v for k, v in PORTAL_PAYLOAD_BYTE_OFFSETS["ERC20"].items() if k.startswith("bytes")},
+                "js_decode_example": PORTAL_PAYLOAD_BYTE_OFFSETS["ERC20"]["js_decode_example"],
+                "warning": PORTAL_PAYLOAD_BYTE_OFFSETS["_warning"],
             },
             "balance_check": {
                 "description": "Read-only check that the depositor address holds at least `token_amount` before approve/deposit. Uses `depositor_address` when provided, otherwise the same address as `$holder_address` / `holder_address_from_key_command` output.",
@@ -899,25 +1370,15 @@ async def prepare_erc20_deposit_instructions(
             },
             "private_keys": {
                 "depositor_signer": selected_private_key,
-                "all_default_local_private_keys": private_keys,
+                "note": "Change depositor_wallet_index (0-9) to select a different wallet from the dev key bank.",
                 "usage_guidance": "Depositor signs approve and deposit. Use `depositor_wallet_index` or `depositor_private_key` to switch wallets. Use another key for `funding_wallet_private_key` when transferring from a wallet that already holds the token.",
             },
             "holder_address_from_key_command": holder_address_from_key_command,
             "cast_command_templates": {
+                "balance_check": balance_check_command,
                 "transfer_to_depositor": transfer_to_depositor_command,
                 "approve_erc20_portal": approve_command,
                 "deposit_erc20_tokens": deposit_command,
-            },
-            "requested_input": {
-                "application_address": application_address,
-                "token_amount": token_amount,
-                "token_contract_address": token_contract_address,
-                "execution_layer_data": execution_layer_data,
-                "rpc_url": rpc_url,
-                "depositor_wallet_index": depositor_wallet_index,
-                "depositor_private_key_provided": bool(depositor_private_key and str(depositor_private_key).strip()),
-                "depositor_address": depositor_address,
-                "project_path": project_path,
             },
         },
         "warnings": warnings,
@@ -925,10 +1386,8 @@ async def prepare_erc20_deposit_instructions(
             "Run `command -v cast` and `cast --version` on the user's machine.",
             f"Change into the project directory if needed: `{project_path}`.",
             "Run `cartesi address-book` and copy ERC20Portal and token (TestToken or user-specified) addresses into the commands.",
-            f"Obtain the depositor address if needed: `{holder_address_from_key_command}`, or use the configured `depositor_address` for read-only balance checks.",
-            f"Check balance: `{balance_check_command}` — if insufficient, ask the user, then fund with `{transfer_to_depositor_command}`.",
-            f"Approve: `{approve_command}`.",
-            f"Deposit: `{deposit_command}`.",
+            "Obtain the depositor address if needed: run data.holder_address_from_key_command, or use the configured `depositor_address` for read-only balance checks.",
+            "Execute commands in order from data.cast_command_templates: balance_check → transfer_to_depositor (if needed) → approve_erc20_portal → deposit_erc20_tokens.",
         ],
     }
 
@@ -1131,6 +1590,7 @@ async def prepare_erc721_deposit_instructions(
         "status": "success",
         "summary": "Prepared host-side workflow for ERC721 deposits through ERC721Portal.",
         "data": {
+            "context": f"ERC721 deposit: token ID {token_id} to {app_ref}",
             "execution_location": "Run these commands on the user's machine, not on this MCP server.",
             "version_guidance": _version_guidance(cli_track),
             "agent_workflow": [
@@ -1173,6 +1633,13 @@ async def prepare_erc721_deposit_instructions(
                 "command": "cartesi address-book",
                 "purpose": "Resolve ERC721Portal and TestNFT addresses.",
                 "target_contracts": ["ERC721Portal", "TestNFT"],
+                "note": "Contract addresses change between CLI versions and network environments — always use `cartesi address-book` as the authoritative source.",
+            },
+            "backend_decode_reference": {
+                "description": "In the advance handler, detect ERC721 deposits by checking msg_sender and decode the payload using these byte offsets.",
+                "detect_by": PORTAL_PAYLOAD_BYTE_OFFSETS["ERC721"]["detect_by"],
+                "byte_offsets": {k: v for k, v in PORTAL_PAYLOAD_BYTE_OFFSETS["ERC721"].items() if k.startswith("bytes")},
+                "warning": PORTAL_PAYLOAD_BYTE_OFFSETS["_warning"],
             },
             "ownership_and_balance_checks": {
                 "cast_templates": {
@@ -1222,7 +1689,7 @@ async def prepare_erc721_deposit_instructions(
             "private_keys": {
                 "owner_minter_only_for_safe_mint": owner_minter_private_key,
                 "depositor_signer": depositor_key,
-                "all_default_local_private_keys": private_keys,
+                "note": "Change depositor_wallet_index (0-9) to select a different wallet from the dev key bank.",
                 "usage_guidance": "Never sign `safeMint` with a key other than `owner_minter_only_for_safe_mint` (first key). Use `depositor_signer` for setApprovalForAll and deposit; use other keys only as `current_owner_private_key` for `transferFrom` when moving the NFT to the depositor.",
             },
             "holder_address_from_key_command": holder_address_from_key_command,
@@ -1233,30 +1700,16 @@ async def prepare_erc721_deposit_instructions(
                 "set_approval_for_all_erc721_portal": set_approval_for_all_command,
                 "deposit_erc721_token": deposit_erc721_command,
             },
-            "requested_input": {
-                "application_address": application_address,
-                "token_id": token_id,
-                "token_uri": token_uri,
-                "nft_contract_address": nft_contract_address,
-                "base_layer_data": base_layer_data,
-                "execution_layer_data": execution_layer_data,
-                "rpc_url": rpc_url,
-                "depositor_wallet_index": depositor_wallet_index,
-                "depositor_private_key_provided": bool(depositor_private_key and str(depositor_private_key).strip()),
-                "depositor_address": depositor_address,
-                "project_path": project_path,
-            },
         },
         "warnings": warnings,
         "next_steps": [
             "Run `command -v cast`, `cast --version`, and `command -v curl` on the user's machine.",
             f"Change into the project directory if needed: `{project_path}`.",
             "Run `cartesi address-book` and set ERC721Portal, TestNFT (or chosen NFT), and RPC URL.",
-            f"Confirm depositor address (configured or via `{holder_address_from_key_command}`) matches balance/ownership checks.",
-            f"Check ownership: `{owner_of_cast_command}` or use the curl one-liner in `ownership_and_balance_checks.curl_eth_call_templates`.",
-            f"If needed, mint with `{safe_mint_command}` (first-key / owner only), then `{transfer_from_command}` if the NFT must move to the depositor.",
-            f"Approve portal: `{set_approval_for_all_command}`.",
-            f"Deposit: `{deposit_erc721_command}`.",
+            "Confirm depositor address (configured or via data.holder_address_from_key_command) matches balance/ownership checks.",
+            "Check ownership: use data.ownership_and_balance_checks.cast_templates.owner_of_token_id or the curl one-liner in data.ownership_and_balance_checks.curl_eth_call_templates.",
+            "If needed, run data.cast_command_templates.safe_mint_to_receiver (first-key / owner only), then data.cast_command_templates.transfer_from if the NFT must move to the depositor.",
+            "Execute commands in order from data.cast_command_templates: set_approval_for_all_erc721_portal → deposit_erc721_token.",
         ],
     }
 
@@ -1453,6 +1906,7 @@ async def prepare_erc1155_deposit_instructions(
         "status": "success",
         "summary": "Prepared host-side workflow for ERC1155 single deposits through ERC1155SinglePortal.",
         "data": {
+            "context": f"ERC1155 deposit: {token_amount} of token ID {token_id} to {app_ref}",
             "execution_location": "Run these commands on the user's machine, not on this MCP server.",
             "version_guidance": _version_guidance(cli_track),
             "agent_workflow": [
@@ -1491,6 +1945,13 @@ async def prepare_erc1155_deposit_instructions(
                 "command": "cartesi address-book",
                 "purpose": "Resolve ERC1155SinglePortal and TestMultiToken addresses.",
                 "target_contracts": ["ERC1155SinglePortal", "TestMultiToken"],
+                "note": "Contract addresses change between CLI versions and network environments — always use `cartesi address-book` as the authoritative source.",
+            },
+            "backend_decode_reference": {
+                "description": "In the advance handler, detect ERC1155 deposits by checking msg_sender and decode the payload using these byte offsets.",
+                "detect_by": PORTAL_PAYLOAD_BYTE_OFFSETS["ERC1155_single"]["detect_by"],
+                "byte_offsets": {k: v for k, v in PORTAL_PAYLOAD_BYTE_OFFSETS["ERC1155_single"].items() if k.startswith("bytes")},
+                "warning": PORTAL_PAYLOAD_BYTE_OFFSETS["_warning"],
             },
             "balance_check": {
                 "description": "ERC1155 `balanceOf(address,uint256)` for the depositor and `token_id`.",
@@ -1529,30 +1990,17 @@ async def prepare_erc1155_deposit_instructions(
             "private_keys": {
                 "minter_owner_only_for_mint": minter_private_key,
                 "depositor_signer": depositor_key,
-                "all_default_local_private_keys": private_keys,
+                "note": "Change depositor_wallet_index (0-9) to select a different wallet from the dev key bank.",
                 "usage_guidance": "Sign `mint` only with `minter_owner_only_for_mint`. Sign `safeTransferFrom` from minter→depositor with the minter key. Sign `setApprovalForAll` and `depositSingleERC1155Token` with `depositor_signer`.",
             },
             "holder_address_from_key_command": holder_address_from_key_command,
             "minter_address_from_key_command": minter_address_from_key_command,
             "cast_command_templates": {
+                "balance_check": balance_check_command,
                 "mint": mint_command,
                 "safe_transfer_from": safe_transfer_from_command,
                 "set_approval_for_all_erc1155_single_portal": set_approval_for_all_command,
                 "deposit_single_erc1155_token": deposit_single_command,
-            },
-            "requested_input": {
-                "application_address": application_address,
-                "token_id": token_id,
-                "token_amount": token_amount,
-                "multi_token_contract_address": multi_token_contract_address,
-                "base_layer_data": base_layer_data,
-                "execution_layer_data": execution_layer_data,
-                "mint_and_transfer_data": mint_and_transfer_data,
-                "rpc_url": rpc_url,
-                "depositor_wallet_index": depositor_wallet_index,
-                "depositor_private_key_provided": bool(depositor_private_key and str(depositor_private_key).strip()),
-                "depositor_address": depositor_address,
-                "project_path": project_path,
             },
         },
         "warnings": warnings,
@@ -1560,12 +2008,398 @@ async def prepare_erc1155_deposit_instructions(
             "Run `command -v cast`, `cast --version`, and `command -v curl` on the user's machine.",
             f"Change into the project directory if needed: `{project_path}`.",
             "Run `cartesi address-book` and set ERC1155SinglePortal, TestMultiToken (or chosen ERC1155), and RPC URL.",
-            f"Confirm depositor address via `{holder_address_from_key_command}` or configured `depositor_address`.",
-            f"Check balance: `{balance_check_command}` or `{curl_balance_eth_call}`.",
-            f"If needed: `{mint_command}` (first key only), then `{safe_transfer_from_command}` (minter signs, from=minter, to=depositor).",
-            f"Approve: `{set_approval_for_all_command}`.",
-            f"Deposit: `{deposit_single_command}`.",
+            "Confirm depositor address via data.holder_address_from_key_command or configured `depositor_address`.",
+            "Execute commands in order from data.cast_command_templates: balance_check → mint (first key only, if needed) → safe_transfer_from (minter signs, from=minter, to=depositor) → set_approval_for_all_erc1155_single_portal → deposit_single_erc1155_token.",
         ],
     }
 
 
+# --- ADDITIONAL DEPOSIT TYPES & VOUCHERS ---
+
+
+@mcp.tool(
+    name="prepare_eth_deposit_instructions",
+    description=(
+        "Generate host-machine instructions for depositing ETH (native ether) into a Cartesi application "
+        "via EtherPortal.depositEther(address,bytes). No token approval needed — just a balance check and deposit. "
+        "cli_track options: 'stable-1.5.x', 'alpha-2.x', or 'unknown'."
+    ),
+)
+async def prepare_eth_deposit_instructions(
+    application_address: str | None,
+    eth_amount_wei: str,
+    execution_layer_data: str = "0x",
+    rpc_url: str | None = None,
+    sender_wallet_index: int = 0,
+    sender_private_key: str | None = None,
+    sender_address: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+    project_path: str = ".",
+) -> dict:
+    """Generate cast commands for ETH deposits via EtherPortal."""
+    private_keys = get_default_local_privatekeys()
+    selected_key = _resolve_depositor_signing_key(private_keys, sender_private_key, sender_wallet_index)
+    balance_holder_ref = _depositor_balance_holder_ref(sender_address)
+    exec_hex = (
+        normalize_input_payload_to_hex(execution_layer_data)
+        if execution_layer_data and execution_layer_data.strip()
+        else "0x"
+    )
+    rpc_ref = rpc_url or "$rpc_url"
+    app_ref = application_address or "$application_address"
+
+    balance_check_command = _command(["cast", "balance", balance_holder_ref, "--rpc-url", rpc_ref])
+    sender_address_from_key_command = _command(["cast", "wallet", "address", "--private-key", selected_key])
+    deposit_command = _command([
+        "cast", "send", "$ether_portal_address",
+        "depositEther(address,bytes)",
+        app_ref, exec_hex,
+        "--value", eth_amount_wei,
+        "--private-key", selected_key,
+        "--rpc-url", rpc_ref,
+    ])
+
+    warnings: list[str] = []
+    if application_address is None:
+        warnings.append("The application contract address is required. Obtain it from the running Cartesi application context.")
+    if rpc_url is None:
+        warnings.append("The RPC URL is required. For stable v1.5.x the common default is `http://127.0.0.1:8545`.")
+
+    return {
+        "status": "success",
+        "summary": "Prepared host-side workflow for ETH deposits through EtherPortal.",
+        "data": {
+            "context": f"ETH deposit: {eth_amount_wei} wei to {app_ref}",
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "agent_workflow": [
+                "Run `cartesi address-book` and record the EtherPortal address.",
+                "Resolve the sender address via data.sender_address_from_key_command if sender_address was not provided.",
+                "Check ETH balance with data.cast_command_templates.balance_check (cast balance — no private key needed).",
+                "If balance is sufficient, run data.cast_command_templates.deposit_ether. No approval step needed for ETH.",
+            ],
+            "requirements": {
+                "cast_install_check": ["command -v cast", "cast --version"],
+                "required_values": ["application_address", "rpc_url", "ether_portal_address", "eth_amount_wei", "sender private key"],
+            },
+            "address_book_guidance": {
+                "command": "cartesi address-book",
+                "target_contracts": ["EtherPortal"],
+            },
+            "execution_layer_data": {"original": execution_layer_data, "normalized_hex": exec_hex},
+            "private_keys": {
+                "sender_signer": selected_key,
+                "note": "Change sender_wallet_index (0-9) to select a different wallet from the dev key bank.",
+            },
+            "sender_address_from_key_command": sender_address_from_key_command,
+            "cast_command_templates": {
+                "balance_check": balance_check_command,
+                "deposit_ether": deposit_command,
+            },
+        },
+        "warnings": warnings,
+        "next_steps": [
+            "Run `command -v cast` and `cast --version` on the user's machine.",
+            f"Change into the project directory if needed: `{project_path}`.",
+            "Run `cartesi address-book` and record EtherPortal address.",
+            "Execute in order from data.cast_command_templates: balance_check → deposit_ether.",
+        ],
+    }
+
+
+@mcp.tool(
+    name="prepare_erc1155_batch_deposit_instructions",
+    description=(
+        "Generate host-machine instructions for depositing multiple ERC1155 token IDs in one transaction "
+        "via ERC1155BatchPortal.depositBatchERC1155Token(address,address,uint256[],uint256[],bytes,bytes). "
+        "cli_track options: 'stable-1.5.x', 'alpha-2.x', or 'unknown'."
+    ),
+)
+async def prepare_erc1155_batch_deposit_instructions(
+    application_address: str | None,
+    token_ids: list[str],
+    token_amounts: list[str],
+    base_layer_data: str = "0x",
+    execution_layer_data: str = "0x",
+    multi_token_contract_address: str | None = None,
+    rpc_url: str | None = None,
+    depositor_wallet_index: int = 0,
+    depositor_private_key: str | None = None,
+    depositor_address: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+    project_path: str = ".",
+) -> dict:
+    """Generate cast commands for ERC1155 batch deposits via ERC1155BatchPortal."""
+    private_keys = get_default_local_privatekeys()
+    depositor_key = _resolve_depositor_signing_key(private_keys, depositor_private_key, depositor_wallet_index)
+    base_hex = normalize_input_payload_to_hex(base_layer_data) if base_layer_data and base_layer_data.strip() else "0x"
+    exec_hex = normalize_input_payload_to_hex(execution_layer_data) if execution_layer_data and execution_layer_data.strip() else "0x"
+
+    token_ref = multi_token_contract_address or "$test_multi_token_contract_address"
+    app_ref = application_address or "$application_address"
+    rpc_ref = rpc_url or "$rpc_url"
+
+    ids_str = "[" + ",".join(token_ids) + "]"
+    amounts_str = "[" + ",".join(token_amounts) + "]"
+
+    set_approval_command = _command([
+        "cast", "send", token_ref,
+        "setApprovalForAll(address,bool)",
+        "$erc1155_batch_portal_address", "true",
+        "--rpc-url", rpc_ref,
+        "--private-key", depositor_key,
+    ])
+
+    deposit_batch_command = _command([
+        "cast", "send", "$erc1155_batch_portal_address",
+        "depositBatchERC1155Token(address,address,uint256[],uint256[],bytes,bytes)",
+        token_ref, app_ref, ids_str, amounts_str, base_hex, exec_hex,
+        "--rpc-url", rpc_ref,
+        "--private-key", depositor_key,
+    ])
+
+    holder_address_command = _command(["cast", "wallet", "address", "--private-key", depositor_key])
+
+    warnings: list[str] = []
+    if application_address is None:
+        warnings.append("The application contract address is required.")
+    if rpc_url is None:
+        warnings.append("The RPC URL is required. For stable v1.5.x the common default is `http://127.0.0.1:8545`.")
+    if multi_token_contract_address is None:
+        warnings.append("No multi-token contract address provided: use TestMultiToken from `cartesi address-book`.")
+    if len(token_ids) != len(token_amounts):
+        warnings.append("token_ids and token_amounts must have the same length.")
+
+    return {
+        "status": "success",
+        "summary": "Prepared host-side workflow for ERC1155 batch deposits through ERC1155BatchPortal.",
+        "data": {
+            "context": f"ERC1155 batch deposit: {len(token_ids)} token IDs to {app_ref}",
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "agent_workflow": [
+                "Run `cartesi address-book` and record ERC1155BatchPortal and TestMultiToken addresses.",
+                "Ensure the depositor holds sufficient balance of each token_id/amount pair. Check balances individually with `cast call token 'balanceOf(address,uint256)' depositor_address token_id`.",
+                "Run set_approval_for_all to approve ERC1155BatchPortal.",
+                "Run deposit_batch to deposit all tokens in one transaction.",
+            ],
+            "token_ids": token_ids,
+            "token_amounts": token_amounts,
+            "base_layer_data": {"original": base_layer_data, "normalized_hex": base_hex},
+            "execution_layer_data": {"original": execution_layer_data, "normalized_hex": exec_hex},
+            "private_keys": {
+                "depositor_signer": depositor_key,
+                "note": "Change depositor_wallet_index (0-9) to select a different wallet from the dev key bank.",
+            },
+            "holder_address_from_key_command": holder_address_command,
+            "cast_command_templates": {
+                "set_approval_for_all_erc1155_batch_portal": set_approval_command,
+                "deposit_batch_erc1155_tokens": deposit_batch_command,
+            },
+        },
+        "warnings": warnings,
+        "next_steps": [
+            "Run `command -v cast` and `cast --version` on the user's machine.",
+            f"Change into the project directory if needed: `{project_path}`.",
+            "Run `cartesi address-book` and record ERC1155BatchPortal and TestMultiToken addresses.",
+            "Verify depositor holds all required token balances before proceeding.",
+            "Execute in order from data.cast_command_templates: set_approval_for_all_erc1155_batch_portal → deposit_batch_erc1155_tokens.",
+        ],
+    }
+
+
+@mcp.tool(
+    name="prepare_voucher_execution_instructions",
+    description=(
+        "Generate host-machine cast instructions for executing a Cartesi voucher. "
+        "Vouchers are generated by the Cartesi application and can be executed after the epoch is finalized. "
+        "Requires the voucher's destination, payload, and proof from the GraphQL API."
+    ),
+)
+async def prepare_voucher_execution_instructions(
+    cartesi_dapp_address: str | None,
+    voucher_destination: str | None,
+    voucher_payload: str | None,
+    voucher_index: int = 0,
+    input_index: int = 0,
+    rpc_url: str | None = None,
+    executor_wallet_index: int = 0,
+    executor_private_key: str | None = None,
+    cli_track: LOCAL_CLI_TRACK = "unknown",
+    project_path: str = ".",
+) -> dict:
+    """Generate cast commands for executing a Cartesi voucher."""
+    private_keys = get_default_local_privatekeys()
+    executor_key = _resolve_depositor_signing_key(private_keys, executor_private_key, executor_wallet_index)
+
+    rpc_ref = rpc_url or "$rpc_url"
+    dapp_ref = cartesi_dapp_address or "$cartesi_dapp_address"
+    dest_ref = voucher_destination or "$voucher_destination"
+    payload_ref = voucher_payload or "$voucher_payload"
+
+    graphql_query = (
+        "{ vouchers(condition: {inputIndex: INPUT_INDEX, outputIndex: VOUCHER_INDEX}) { "
+        "edges { node { proof { validity { inputIndexWithinEpoch outputIndexWithinEpoch "
+        "outputHashesRootHash vouchersEpochRootHash noticesEpochRootHash machineStateHash "
+        "outputHashInOutputHashesSiblings outputHashInVouchersSiblings } context } } } } }"
+    ).replace("INPUT_INDEX", str(input_index)).replace("VOUCHER_INDEX", str(voucher_index))
+
+    execute_voucher_command = _command([
+        "cast", "send", dapp_ref,
+        "executeVoucher(address,bytes,((bytes32[3]),uint256))",
+        dest_ref, payload_ref, "$proof_struct",
+        "--private-key", executor_key,
+        "--rpc-url", rpc_ref,
+    ])
+
+    executor_address_command = _command(["cast", "wallet", "address", "--private-key", executor_key])
+
+    warnings: list[str] = []
+    if cartesi_dapp_address is None:
+        warnings.append("The CartesiDApp contract address is required. Obtain it from `cartesi address-book` or the running application context.")
+    if rpc_url is None:
+        warnings.append("The RPC URL is required.")
+    if voucher_destination is None or voucher_payload is None:
+        warnings.append("voucher_destination and voucher_payload must be fetched from the GraphQL API before execution.")
+    warnings.append(
+        "Vouchers can only be executed after the epoch containing their input is finalized. "
+        "The proof struct ($proof_struct) must be fetched from the GraphQL API and ABI-encoded before executing."
+    )
+
+    return {
+        "status": "success",
+        "summary": "Prepared host-side workflow for executing a Cartesi voucher.",
+        "data": {
+            "context": f"Voucher execution: input_index={input_index}, voucher_index={voucher_index} on {dapp_ref}",
+            "execution_location": "Run these commands on the user's machine, not on this MCP server.",
+            "version_guidance": _version_guidance(cli_track),
+            "agent_workflow": [
+                "Run `cartesi address-book` to find the CartesiDApp address.",
+                "Query the GraphQL API (usually at http://localhost:8080/graphql) for the voucher proof using the graphql_query below.",
+                "Extract the proof fields from the response and ABI-encode them into the struct format required by executeVoucher.",
+                "Run the execute_voucher_command after replacing $proof_struct with the encoded proof.",
+            ],
+            "graphql_proof_query": graphql_query,
+            "graphql_endpoint_hint": "Usually http://localhost:8080/graphql for local dev (stable v1.5.x).",
+            "proof_struct_format": (
+                "The proof parameter for executeVoucher is: ((bytes32[3] siblings), uint256 epochIndex). "
+                "Encode it with: cast abi-encode '((bytes32[3],uint256))' '([hash1,hash2,hash3],epochIndex)'"
+            ),
+            "private_keys": {
+                "executor_signer": executor_key,
+                "note": "Any wallet can execute a voucher; change executor_wallet_index (0-9) as needed.",
+            },
+            "executor_address_from_key_command": executor_address_command,
+            "cast_command_templates": {
+                "execute_voucher": execute_voucher_command,
+            },
+        },
+        "warnings": warnings,
+        "next_steps": [
+            "Run `command -v cast` and `cast --version` on the user's machine.",
+            f"Change into the project directory if needed: `{project_path}`.",
+            "Fetch the voucher proof from the GraphQL API using data.graphql_proof_query.",
+            "ABI-encode the proof struct per data.proof_struct_format.",
+            "Execute via data.cast_command_templates.execute_voucher after substituting $proof_struct.",
+        ],
+    }
+
+
+# --- DETAIL FETCH (ADDITIONAL) ---
+
+
+@mcp.tool(
+    name="list_doc_route_sections",
+    description=(
+        "List all unique section names for a documentation resource's routes. "
+        "Use this before calling list_resource_doc_routes with a section filter to discover valid section values."
+    ),
+)
+async def list_doc_route_sections(resource_id: str) -> dict:
+    """Returns distinct section names for a documentation resource so agents can filter routes precisely."""
+    async with resource_service() as svc:
+        sections = await svc.list_doc_route_sections(_parse_uuid(resource_id))
+        return {
+            "status": "success",
+            "summary": f"Found {len(sections)} unique sections for resource {resource_id}.",
+            "data": {"resource_id": resource_id, "sections": sections},
+            "warnings": [],
+            "next_steps": [
+                "Use a returned section name as the section= parameter in list_resource_doc_routes or search_documentation_routes.",
+                "Section names are case-insensitive when used as filters.",
+            ],
+        }
+
+
+# --- CONTENT & LOGGING ---
+
+
+@mcp.tool(
+    name="fetch_resource_content",
+    description=(
+        "Fetch and return the text content of a Cartesi knowledge resource URL. "
+        "Use after search tools return a canonical_url or route url that you need the full contents of. "
+        "Returns up to max_chars characters with a continuation offset parameter. "
+        "Only URLs returned by this server's own tools are accepted."
+    ),
+)
+async def fetch_resource_content(
+    url: str,
+    offset: int = 0,
+    max_chars: int = 4000,
+) -> dict:
+    """Fetch external URL content — restricted to URLs from this server's own resources."""
+    import httpx
+    from urllib.parse import urlparse
+
+    ALLOWED_DOMAINS = {
+        "docs.cartesi.io",
+        "cartesi.io",
+        "github.com",
+        "raw.githubusercontent.com",
+        "dev.cartesi.io",
+    }
+
+    parsed = urlparse(url)
+    if parsed.netloc not in ALLOWED_DOMAINS:
+        return {
+            "status": "error",
+            "summary": f"URL domain '{parsed.netloc}' is not in the allowed list.",
+            "data": {"allowed_domains": sorted(ALLOWED_DOMAINS)},
+            "warnings": ["Only URLs from known Cartesi knowledge domains can be fetched via this tool."],
+            "next_steps": ["Use your own web-fetch capability for external URLs."],
+        }
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            full_text = response.text
+    except Exception as exc:
+        return {
+            "status": "error",
+            "summary": f"Failed to fetch URL: {exc}",
+            "data": {"url": url},
+            "warnings": [],
+            "next_steps": ["Verify the URL is accessible and try again, or fetch it with your own web capability."],
+        }
+
+    content = full_text[offset: offset + max_chars]
+    has_more = len(full_text) > offset + max_chars
+
+    return {
+        "status": "success",
+        "summary": f"Fetched {len(content)} characters from {url}.",
+        "data": {
+            "url": url,
+            "content": content,
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": offset + max_chars if has_more else None,
+            "content_length": len(full_text),
+        },
+        "warnings": [],
+        "next_steps": [
+            "If has_more is true, call fetch_resource_content again with next_offset to read the next chunk.",
+        ],
+    }

@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     )
     default_page_size: int = Field(default=10, alias="DEFAULT_PAGE_SIZE")
     max_page_size: int = Field(default=50, alias="MAX_PAGE_SIZE")
+    db_pool_size: int = Field(default=5, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
+    db_pool_timeout: int = Field(default=30, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=1800, alias="DB_POOL_RECYCLE")
     # Stored as raw strings so pydantic-settings does not attempt JSON-decoding.
     # Use the computed properties extra_allowed_hosts / extra_allowed_origins for the parsed lists.
     extra_allowed_hosts_raw: str = Field(default="", alias="EXTRA_ALLOWED_HOSTS")

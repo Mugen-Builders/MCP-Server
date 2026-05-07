@@ -42,7 +42,7 @@ class ResourceCard(BaseModel):
     title: str
     summary: str
     canonical_url: str
-    kind: Literal["repository", "documentation", "article", "resource"]
+    kind: Literal["repository", "documentation", "article", "skill", "resource"]
     source: str
     tags: list[str] = Field(default_factory=list)
     uris: ResourceLinkSet

@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.formatters.resource_formatter import format_card, format_detail, format_doc_route, format_repository_status
+from src.formatters.resource_formatter import format_article_content, format_card, format_detail, format_doc_route, format_repository_status, format_skill_content
 from src.repositories.resource_repository import ResourceRepository
 from src.schemas.resources import ListDocRoutesResult, RepositoryStatus, ResourceDetail, SearchResourcesResult
+
+_TAXONOMY_TTL = timedelta(minutes=10)
+_taxonomy_cache: dict | None = None
+_taxonomy_cache_ts: datetime | None = None
+_counts_cache: dict | None = None
+_counts_cache_ts: datetime | None = None
+
+
+def _utcnow() -> datetime:
+    return datetime.now(tz=timezone.utc)
 
 
 class NotFoundError(ValueError):
@@ -94,27 +105,101 @@ class ResourceService:
             "doc_routes": route_hits,
         }
 
+    async def list_doc_route_sections(self, resource_id: UUID) -> list[str]:
+        row = await self.repo.get_by_id(resource_id)
+        if row is None:
+            raise NotFoundError(f"Resource {resource_id} was not found")
+        return await self.repo.list_distinct_route_sections(resource_id)
+
     async def get_tag_catalog(self) -> list[str]:
-        return await self.repo.list_distinct_tag_titles()
+        global _taxonomy_cache, _taxonomy_cache_ts
+        now = _utcnow()
+        if _taxonomy_cache is None or _taxonomy_cache_ts is None or (now - _taxonomy_cache_ts) > _TAXONOMY_TTL:
+            tags = await self.repo.list_distinct_tag_titles()
+            sources = await self.repo.list_distinct_source_titles()
+            _taxonomy_cache = {"tags": tags, "sources": sources}
+            _taxonomy_cache_ts = now
+        return _taxonomy_cache["tags"]
 
     async def get_source_catalog(self) -> list[str]:
-        return await self.repo.list_distinct_source_titles()
+        global _taxonomy_cache, _taxonomy_cache_ts
+        now = _utcnow()
+        if _taxonomy_cache is None or _taxonomy_cache_ts is None or (now - _taxonomy_cache_ts) > _TAXONOMY_TTL:
+            tags = await self.repo.list_distinct_tag_titles()
+            sources = await self.repo.list_distinct_source_titles()
+            _taxonomy_cache = {"tags": tags, "sources": sources}
+            _taxonomy_cache_ts = now
+        return _taxonomy_cache["sources"]
 
     async def get_knowledge_base_summary(self) -> dict:
-        resources = await self.repo.list_all_resources()
-        repo_count = sum(1 for r in resources if r.is_repository)
-        doc_count = sum(1 for r in resources if r.is_documentation)
-        other_count = len(resources) - repo_count - doc_count
-        doc_route_count = await self.repo.count_doc_routes()
+        global _counts_cache, _counts_cache_ts
+        now = _utcnow()
+        if _counts_cache is None or _counts_cache_ts is None or (now - _counts_cache_ts) > _TAXONOMY_TTL:
+            counts = await self.repo.count_resources_by_type()
+            doc_route_count = await self.repo.count_doc_routes()
+            _counts_cache = {
+                "total_resources": counts["total"],
+                "repositories": counts["repositories"],
+                "documentation": counts["documentation"],
+                "articles": counts["articles"],
+                "skills": counts["skills"],
+                "other": counts["other"],
+                "total_doc_routes": doc_route_count,
+            }
+            _counts_cache_ts = now
 
         return {
-            "summary": {
-                "total_resources": len(resources),
-                "repositories": repo_count,
-                "documentation": doc_count,
-                "articles_and_other": other_count,
-                "total_doc_routes": doc_route_count,
-            },
-            "tags": await self.get_tag_catalog(),
-            "sources": await self.get_source_catalog(),
+            "summary": _counts_cache,
+        }
+
+    async def list_articles(
+        self, tag: str | None = None, source: str | None = None, limit: int = 20
+    ) -> SearchResourcesResult:
+        rows = await self.repo.list_articles(tag=tag, source=source, limit=limit)
+        return SearchResourcesResult(cards=[format_card(row) for row in rows])
+
+    async def get_article(self, resource_id: UUID) -> dict:
+        row = await self.repo.get_by_id(resource_id)
+        if row is None:
+            raise NotFoundError(f"Resource {resource_id} was not found")
+        if not row.is_article or row.article_row is None:
+            raise NotFoundError(f"Resource {resource_id} is not an article")
+        content = format_article_content(row)
+        return {
+            "resource": format_card(row).model_dump(mode="json"),
+            "article_content": content.model_dump(mode="json") if content else None,
+        }
+
+    async def list_skills(
+        self, tag: str | None = None, source: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        rows = await self.repo.list_skills(tag=tag, source=source, limit=limit)
+        return [
+            {
+                "resource_id": str(row.id),
+                "title": row.title,
+                "description": row.description,
+                "source": row.source.title,
+                "tags": sorted([link.tag.title for link in row.tag_links]),
+                "last_updated_at": row.skill_row.last_updated_at.isoformat() if row.skill_row and row.skill_row.last_updated_at else None,
+                "body_available": True,
+                "hint": f"Call get_skill with resource_id='{row.id}' to retrieve the full skill body.",
+            }
+            for row in rows
+        ]
+
+    async def get_skill(self, resource_id: UUID) -> dict:
+        row = await self.repo.get_by_id(resource_id)
+        if row is None:
+            raise NotFoundError(f"Resource {resource_id} was not found")
+        if not row.is_skill or row.skill_row is None:
+            raise NotFoundError(f"Resource {resource_id} is not a skill")
+        content = format_skill_content(row)
+        return {
+            "resource_id": str(row.id),
+            "title": row.title,
+            "description": row.description,
+            "source": row.source.title,
+            "tags": sorted([link.tag.title for link in row.tag_links]),
+            "skill_content": content.model_dump(mode="json") if content else None,
         }

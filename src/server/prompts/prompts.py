@@ -21,7 +21,7 @@ def debug_cartesi_issue(issue_description: str, prefer_official_only: bool = Tru
     return (
         "You are investigating a Cartesi issue. "
         f"Use {trust_hint}. "
-        f"Start by calling get_debugging_context with this issue description: {issue_description!r}. "
+        f"Start by calling build_debugging_context with this issue description: {issue_description!r}. "
         "Then inspect the top resource and route URIs that seem most relevant. "
         "This server currently returns metadata and links rather than stored page bodies, "
         "so fetch the canonical_url or route url separately when you need the actual contents. "
@@ -32,12 +32,17 @@ def debug_cartesi_issue(issue_description: str, prefer_official_only: bool = Tru
 @mcp.prompt()
 def find_cartesi_docs(topic: str, section: str | None = None) -> str:
     """Creates a prompt that guides an agent to find the best documentation for a Cartesi topic."""
-    suffix = f" Limit route search to the section {section!r}." if section else ""
+    suffix = (
+        f" Limit route search to the section {section!r} — but first call get_knowledge_taxonomy "
+        "to verify this section name exists before filtering by it."
+        if section
+        else ""
+    )
     return (
         f"Find the best Cartesi documentation for the topic {topic!r}. "
-        "First call search_doc_routes, then fetch the best one or two route URIs and their parent resource. "
-        "Use the returned route url to fetch the actual documentation page contents when needed."
-        f"{suffix} Focus on official docs before external material."
+        "Start by calling summarize_knowledge_base to orient yourself, then call search_documentation_routes. "
+        "For the most relevant route or two, fetch the route URL separately for the actual documentation contents. "
+        f"Focus on official docs (source: 'core contributors') before community material.{suffix}"
     )
 
 
@@ -46,7 +51,8 @@ def explain_repository_context(repository_resource_id: str) -> str:
     """Creates a prompt for understanding a tracked repository and its surrounding context."""
     return (
         f"Explain the tracked repository with resource ID {repository_resource_id!r}. "
-        "Call get_repository_status and get_resource_details. "
-        "Summarize what the repository is, who the source is, what tags describe it, and what documentation resources might be adjacent to it. "
+        "Call get_repository_sync_status and get_resource_detail for this resource ID. "
+        "Summarize what the repository is, its source, its tags, and what documentation resources are adjacent. "
+        "If freshness.stale is true, warn the user that the repository metadata may be outdated and suggest fetching the canonical_url for current information. "
         "If you need the repository page contents, fetch the returned canonical_url separately."
     )

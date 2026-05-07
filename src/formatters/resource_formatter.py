@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.db.models import DocRoute, Resource
 from src.schemas.common import FreshnessInfo, ResourceCard, ResourceLinkSet, SourceSummary, TagSummary
-from src.schemas.resources import DocRouteOut, RepositoryStatus, ResourceDetail
+from src.schemas.resources import ArticleContent, DocRouteOut, RepositoryStatus, ResourceDetail, SkillContent
 
 STALE_AFTER_DAYS = 30
 
@@ -14,11 +14,17 @@ def utcnow() -> datetime:
 
 
 def infer_kind(resource: Resource) -> str:
-    tag_titles = {link.tag.title.lower() for link in resource.tag_links}
+    # Explicit DB flags take priority over tag-based inference
+    if resource.is_skill:
+        return "skill"
+    if resource.is_article:
+        return "article"
     if resource.is_repository:
         return "repository"
     if resource.is_documentation:
         return "documentation"
+    # Legacy fallback: articles may predate the is_article flag
+    tag_titles = {link.tag.title.lower() for link in resource.tag_links}
     if {"article", "blog", "blog post", "blog-post"} & tag_titles:
         return "article"
     return "resource"
@@ -27,6 +33,11 @@ def infer_kind(resource: Resource) -> str:
 def summarize_text(resource: Resource) -> str:
     if resource.description:
         return resource.description.strip()[:240]
+    # Skills and articles have inline bodies — include an excerpt in the summary
+    if resource.is_skill and resource.skill_row:
+        return resource.skill_row.body.strip()[:240]
+    if resource.is_article and resource.article_row:
+        return resource.article_row.body.strip()[:240]
     if resource.is_documentation:
         return f"Documentation resource: {resource.title}"
     if resource.is_repository:
@@ -40,7 +51,7 @@ def resource_links(resource: Resource) -> ResourceLinkSet:
         self_uri=f"cartesi://resources/{rid}",
         repository_uri=f"cartesi://repositories/{rid}" if resource.is_repository else None,
         documentation_uri=f"cartesi://docs/{rid}" if resource.is_documentation else None,
-        routes_uri=f"cartesi://docs/{rid}/routes" if resource.is_documentation else None,
+        routes_uri=None,  # Use list_resource_doc_routes tool with resource_id to get routes (no resource handler registered for this URI pattern)
     )
 
 
@@ -80,6 +91,25 @@ def format_doc_route(route: DocRoute) -> DocRouteOut:
     )
 
 
+def format_article_content(resource: Resource) -> ArticleContent | None:
+    if resource.article_row is None:
+        return None
+    return ArticleContent(
+        body=resource.article_row.body,
+        year_published=resource.article_row.year_published,
+        last_updated_at=resource.article_row.last_updated_at,
+    )
+
+
+def format_skill_content(resource: Resource) -> SkillContent | None:
+    if resource.skill_row is None:
+        return None
+    return SkillContent(
+        body=resource.skill_row.body,
+        last_updated_at=resource.skill_row.last_updated_at,
+    )
+
+
 def format_detail(resource: Resource, include_routes: bool = True) -> ResourceDetail:
     return ResourceDetail(
         id=resource.id,
@@ -93,6 +123,8 @@ def format_detail(resource: Resource, include_routes: bool = True) -> ResourceDe
         uris=resource_links(resource),
         route_count=len(resource.doc_routes),
         routes=[format_doc_route(route) for route in sorted(resource.doc_routes, key=lambda r: (r.section.lower(), r.name.lower()))] if include_routes else [],
+        article_content=format_article_content(resource),
+        skill_content=format_skill_content(resource),
     )
 
 

@@ -9,6 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.schemas.common import FreshnessInfo, ResourceCard, ResourceLinkSet, SourceSummary, TagSummary
 
 
+class ArticleContent(BaseModel):
+    """Inline body content for an article resource — no external URL fetch required."""
+    body: str
+    year_published: int | None = None
+    last_updated_at: datetime | None = None
+
+
+class SkillContent(BaseModel):
+    """Inline body content for a skill resource — no external URL fetch required."""
+    body: str
+    last_updated_at: datetime | None = None
+
+
 class DocRouteOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -28,13 +41,15 @@ class ResourceDetail(BaseModel):
     title: str
     description: str | None = None
     canonical_url: str
-    kind: Literal["repository", "documentation", "article", "resource"]
+    kind: Literal["repository", "documentation", "article", "skill", "resource"]
     source: SourceSummary
     tags: list[TagSummary] = Field(default_factory=list)
     freshness: FreshnessInfo
     uris: ResourceLinkSet
     route_count: int = 0
     routes: list[DocRouteOut] = Field(default_factory=list)
+    article_content: ArticleContent | None = None
+    skill_content: SkillContent | None = None
 
 
 class SearchResourcesResult(BaseModel):
