@@ -98,9 +98,20 @@ class ResourceService:
         source_filter = "core contributors" if prefer_official_only else None
         resource_hits = await self.search_resources(query=query, source=source_filter, limit=limit)
         route_hits = await self.search_doc_routes(query=query, source=source_filter, limit=limit)
+        skill_hits = await self.repo.search_skills(query=query, source=source_filter, limit=4)
+        skill_cards = [
+            {
+                "resource_id": str(r.id),
+                "title": r.title,
+                "kind": "skill",
+                "hint": f"Call get_skill(resource_id='{r.id}') — body is inline, no URL fetch needed.",
+            }
+            for r in skill_hits
+        ]
         return {
             "query": query,
             "prefer_official_only": prefer_official_only,
+            "matching_skills": skill_cards,
             "resources": resource_hits.model_dump(mode="json")["cards"],
             "doc_routes": route_hits,
         }

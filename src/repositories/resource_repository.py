@@ -55,7 +55,7 @@ class ResourceRepository:
                     "english",
                     func.coalesce(Resource.title, "") + " " + func.coalesce(Resource.description, ""),
                 )
-                ts_query = func.websearch_to_tsquery("english", q)
+                ts_query = func.plainto_tsquery("english", q)
                 fts_filter = ts_vector.op("@@")(ts_query)
                 stmt = stmt.where(fts_filter)
             except Exception:
@@ -82,6 +82,8 @@ class ResourceRepository:
             stmt = stmt.where(Resource.is_repository.is_(True))
         elif kind == "documentation":
             stmt = stmt.where(Resource.is_documentation.is_(True))
+        elif kind == "skill":
+            stmt = stmt.where(Resource.is_skill.is_(True))
         elif kind == "article":
             stmt = stmt.join(Resource.tag_links, isouter=True).join(ResourceTag.tag, isouter=True).where(
                 func.lower(Tag.title).in_(["article", "blog", "blog post", "blog-post"])
@@ -146,21 +148,28 @@ class ResourceRepository:
         tag: str | None = None,
         limit: int = 10,
     ) -> list[DocRoute]:
-        needle = f"%{query.strip()}%"
+        q = query.strip()
+        ts_vector = func.to_tsvector(
+            "english",
+            func.coalesce(DocRoute.name, "")
+            + " "
+            + func.coalesce(DocRoute.section, "")
+            + " "
+            + func.coalesce(DocRoute.description, "")
+            + " "
+            + func.coalesce(Resource.title, "")
+            + " "
+            + func.coalesce(Resource.description, ""),
+        )
+        ts_query = func.plainto_tsquery("english", q)
         stmt = (
             select(DocRoute)
             .join(DocRoute.resource)
-            .options(selectinload(DocRoute.resource).selectinload(Resource.source), selectinload(DocRoute.resource).selectinload(Resource.tag_links).selectinload(ResourceTag.tag))
-            .where(
-                or_(
-                    DocRoute.name.ilike(needle),
-                    DocRoute.section.ilike(needle),
-                    DocRoute.description.ilike(needle),
-                    DocRoute.url.ilike(needle),
-                    Resource.title.ilike(needle),
-                    Resource.description.ilike(needle),
-                )
+            .options(
+                selectinload(DocRoute.resource).selectinload(Resource.source),
+                selectinload(DocRoute.resource).selectinload(Resource.tag_links).selectinload(ResourceTag.tag),
             )
+            .where(ts_vector.op("@@")(ts_query))
             .order_by(DocRoute.section.asc(), DocRoute.name.asc())
         )
 
