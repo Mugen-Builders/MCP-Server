@@ -149,19 +149,23 @@ class ResourceRepository:
         limit: int = 10,
     ) -> list[DocRoute]:
         q = query.strip()
-        ts_vector = func.to_tsvector(
-            "english",
-            func.coalesce(DocRoute.name, "")
-            + " "
-            + func.coalesce(DocRoute.section, "")
-            + " "
-            + func.coalesce(DocRoute.description, "")
-            + " "
-            + func.coalesce(Resource.title, "")
-            + " "
-            + func.coalesce(Resource.description, ""),
-        )
-        ts_query = func.plainto_tsquery("english", q)
+        # Split into individual words and match any of them (OR), so a multi-word query
+        # like "advance inspect API" matches routes containing any of those words rather
+        # than requiring the full phrase to appear verbatim.
+        words = [w for w in q.split() if len(w) > 2]
+        if not words:
+            words = [q]
+        word_filters = [
+            or_(
+                DocRoute.name.ilike(f"%{w}%"),
+                DocRoute.section.ilike(f"%{w}%"),
+                DocRoute.description.ilike(f"%{w}%"),
+                DocRoute.url.ilike(f"%{w}%"),
+                Resource.title.ilike(f"%{w}%"),
+                Resource.description.ilike(f"%{w}%"),
+            )
+            for w in words
+        ]
         stmt = (
             select(DocRoute)
             .join(DocRoute.resource)
@@ -169,7 +173,7 @@ class ResourceRepository:
                 selectinload(DocRoute.resource).selectinload(Resource.source),
                 selectinload(DocRoute.resource).selectinload(Resource.tag_links).selectinload(ResourceTag.tag),
             )
-            .where(ts_vector.op("@@")(ts_query))
+            .where(or_(*word_filters))
             .order_by(DocRoute.section.asc(), DocRoute.name.asc())
         )
 
